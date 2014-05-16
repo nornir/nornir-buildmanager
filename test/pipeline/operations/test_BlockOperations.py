@@ -13,7 +13,15 @@ import nornir_buildmanager.build as build
 from nornir_buildmanager.operations.block import *
 from nornir_imageregistration.transforms import registrationtree
 import test.pipeline.test_sectionimage as test_sectionimage
+import nornir_buildmanager.VolumeManagerETree as volman
 
+
+def _RTNodesToNumberList(Nodes):
+    nums = []
+    for n in Nodes:
+        nums.append(n.SectionNumber)
+
+    return nums
 
 def ValidateStosMap(test, StosMapNode, expectedRT):
 
@@ -23,7 +31,9 @@ def ValidateStosMap(test, StosMapNode, expectedRT):
 
     for expectedNode in expectedRT.Nodes.values():
         actualNode = rt.Nodes[expectedNode.SectionNumber]
-        test.assertEqual(actualNode.Children, expectedNode.Children)
+        actualNodeNumbers = _RTNodesToNumberList(actualNode.Children)
+        expectedNodeNumbers = _RTNodesToNumberList(expectedNode.Children)
+        test.assertEqual(actualNodeNumbers, expectedNodeNumbers)
 
 
 def FetchStosTransform(test, VolumeObj, groupName, ControlSection, MappedSection):
@@ -65,25 +75,189 @@ def FetchStosTransform(test, VolumeObj, groupName, ControlSection, MappedSection
 
 class SectionToSectionMappingTest(test_sectionimage.ImportLMImages):
 
-    def testCreateSectionToSectionMapping(self):
 
+    def _GetResetBlockNode(self):
         VolumeObj = self.LoadVolumeObj()
-
         BlockNode = VolumeObj.find("Block")
         self.assertIsNotNone(BlockNode)
 
-        OutputBlockNode = CreateSectionToSectionMapping(Parameters={'NumAdjacentSections' : 2}, BlockNode=BlockNode, Logger=self.Logger)
+        return BlockNode
+
+    def SetNonStosSectionList(self, BlockNode, NonStosNumberList, **kwargs):
+
+        StosExemptNode = VolumeManagerETree.XElementWrapper(tag='NonStosSectionNumbers')
+        (added, StosExemptNode) = BlockNode.UpdateOrAddChild(StosExemptNode)
+
+        # Fetch the list of the exempt nodes from the element text
+        if len(NonStosNumberList) > 0:
+            StosExemptNode.text = ','.join(str(x) for x in NonStosNumberList)
+        else:
+            StosExemptNode.text = ""
+
+    def _GenerateExpectedRT(self, GoodSections, BadSections, center, adjacentThreshold):
+        # Verify that the sections are mapped correctly
+        expectedRT = registrationtree.RegistrationTree.CreateRegistrationTree(GoodSections, adjacentThreshold=adjacentThreshold, center=center)
+        expectedRT.AddNonControlSections(BadSections)
+        return expectedRT
+
+
+    def testCreateSectionToSectionMapping(self):
+
+        center = 5
+        self.BasicStosMapGeneratorCheck(center, adjacentThreshold=1, Logger=self.Logger)
+        self.BasicStosMapGeneratorCheck(center, adjacentThreshold=2, Logger=self.Logger)
+        self.StosMapGeneratorWithInvalidCheck(center, adjacentThreshold=1, Logger=self.Logger)
+        self.StosMapGeneratorWithInvalidCheck(center, adjacentThreshold=2, Logger=self.Logger)
+
+        self.CheckRemoveDuplicateMappings(center, adjacentThreshold=2, Logger=self.Logger)
+
+        self.StosMapGeneratorAddSectionLaterCheck(center, adjacentThreshold=1, Logger=self.Logger)
+        self.StosMapGeneratorAddSectionLaterCheck(center, adjacentThreshold=2, Logger=self.Logger)
+
+        center = 1
+        self.BasicStosMapGeneratorCheck(center, adjacentThreshold=1, Logger=self.Logger)
+        self.BasicStosMapGeneratorCheck(center, adjacentThreshold=2, Logger=self.Logger)
+        self.StosMapGeneratorWithInvalidCheck(center, adjacentThreshold=1, Logger=self.Logger)
+        self.StosMapGeneratorWithInvalidCheck(center, adjacentThreshold=2, Logger=self.Logger)
+
+        center = 12
+        self.BasicStosMapGeneratorCheck(center, adjacentThreshold=1, Logger=self.Logger)
+        self.BasicStosMapGeneratorCheck(center, adjacentThreshold=2, Logger=self.Logger)
+        self.StosMapGeneratorWithInvalidCheck(center, adjacentThreshold=1, Logger=self.Logger)
+        self.StosMapGeneratorWithInvalidCheck(center, adjacentThreshold=2, Logger=self.Logger)
+
+        center = 0
+        self.BasicStosMapGeneratorCheck(center, adjacentThreshold=1, Logger=self.Logger)
+        self.BasicStosMapGeneratorCheck(center, adjacentThreshold=2, Logger=self.Logger)
+        self.StosMapGeneratorWithInvalidCheck(center, adjacentThreshold=1, Logger=self.Logger)
+        self.StosMapGeneratorWithInvalidCheck(center, adjacentThreshold=2, Logger=self.Logger)
+
+        center = 13
+        self.BasicStosMapGeneratorCheck(center, adjacentThreshold=1, Logger=self.Logger)
+        self.BasicStosMapGeneratorCheck(center, adjacentThreshold=2, Logger=self.Logger)
+        self.StosMapGeneratorWithInvalidCheck(center, adjacentThreshold=1, Logger=self.Logger)
+        self.StosMapGeneratorWithInvalidCheck(center, adjacentThreshold=2, Logger=self.Logger)
+
+
+    def BasicStosMapGeneratorCheck(self, center, adjacentThreshold, Logger):
+
+        BlockNode = self._GetResetBlockNode()
+
+        GoodSections = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        OutputBlockNode = CreateSectionToSectionMapping(Parameters={'NumAdjacentSections' : adjacentThreshold, 'CenterSection' : center}, BlockNode=BlockNode, Logger=self.Logger)
         self.assertIsNotNone(OutputBlockNode)
 
-        VolumeManagerETree.VolumeManager.Save(self.TestOutputPath, VolumeObj)
+        # VolumeManagerETree.VolumeManager.Save(self.TestOutputPath, VolumeObj)
 
         volumechecklist = [VolumeEntry("StosMap", "Name", "PotentialRegistrationChain")]
 
         StosMapNode = VerifyVolume(self, BlockNode, volumechecklist)
 
         # Verify that the sections are mapped correctly
-        expectedRT = registrationtree.RegistrationTree.CreateRegistrationTree([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], adjacentThreshold=2)
+        expectedRT = self._GenerateExpectedRT(GoodSections, [], center, adjacentThreshold)
         ValidateStosMap(self, StosMapNode, expectedRT)
+
+
+    def StosMapGeneratorWithInvalidCheck(self, center, adjacentThreshold, Logger):
+
+        GoodSections = [2, 3, 4, 6, 7, 8, 9]
+        BadSections = [1, 5, 10]
+        BlockNode = self._GetResetBlockNode()
+        self._StosMapGeneratorWithInvalidCheckWithBlock(BlockNode, GoodSections, BadSections, center, adjacentThreshold, Logger)
+
+    def _StosMapGeneratorWithInvalidCheckWithBlock(self, BlockNode, GoodSections, BadSections, center, adjacentThreshold, Logger, expectedRT=None):
+
+        self.SetNonStosSectionList(BlockNode, BadSections)
+
+        OutputBlockNode = CreateSectionToSectionMapping(Parameters={'NumAdjacentSections' : adjacentThreshold, 'CenterSection' : center}, BlockNode=BlockNode, Logger=self.Logger)
+        self.assertIsNotNone(OutputBlockNode)
+
+        volumechecklist = [VolumeEntry("StosMap", "Name", "PotentialRegistrationChain")]
+        StosMapNode = VerifyVolume(self, BlockNode, volumechecklist)
+
+        if expectedRT is None:
+            expectedRT = self._GenerateExpectedRT(GoodSections, BadSections, center, adjacentThreshold)
+
+        ValidateStosMap(self, StosMapNode, expectedRT)
+
+        return OutputBlockNode
+
+
+    def StosMapGeneratorAddSectionLaterCheck(self, center, adjacentThreshold, Logger):
+
+        BlockNode = self._GetResetBlockNode()
+
+        print("Remove section 7")
+        omitSectionNode = BlockNode.GetSection(7)
+        self.assertIsNotNone(omitSectionNode)
+        BlockNode.remove(omitSectionNode)
+
+        GoodSections = [2, 3, 4, 6, 8, 9]
+        BadSections = [1, 5, 10]
+
+        self.SetNonStosSectionList(BlockNode, [1, 5, 10])
+
+        OutputBlockNode = self._StosMapGeneratorWithInvalidCheckWithBlock(BlockNode, GoodSections, BadSections, center, adjacentThreshold, Logger)
+        self.assertIsNotNone(OutputBlockNode)
+
+        # OK, add the section back and make sure it is included in the updated stos map
+
+        print("Add section 7")
+        OutputBlockNode.append(omitSectionNode)
+        GoodSections = [2, 3, 4, 6, 7, 8, 9]
+        BadSections = [1, 5, 10]
+
+        expectedRT = self._GenerateExpectedRT(GoodSections, BadSections, center, adjacentThreshold)
+
+        # We expect extra mappings for section 8 since section 7 did not exxist in the original
+        if(adjacentThreshold == 1):
+            expectedRT.AddPair(6, 8)
+        elif(adjacentThreshold == 2):
+            expectedRT.AddPair(4, 8)
+            expectedRT.AddPair(6, 9)
+        else:
+            self.fail("Test not tweaked for adjacentThreshold > 2")
+
+        OutputBlockNode = self._StosMapGeneratorWithInvalidCheckWithBlock(OutputBlockNode, GoodSections, BadSections, center, adjacentThreshold, Logger, expectedRT)
+        self.assertIsNotNone(OutputBlockNode)
+
+        print("Done!")
+
+    def CheckRemoveDuplicateMappings(self, center, adjacentThreshold, Logger):
+
+        GoodSections = [2, 3, 4, 6, 7, 8, 9]
+        BadSections = [1, 5, 10]
+        BlockNode = self._GetResetBlockNode()
+        self._StosMapGeneratorWithInvalidCheckWithBlock(BlockNode, GoodSections, BadSections, center, adjacentThreshold, Logger)
+
+        volumechecklist = [VolumeEntry("StosMap", "Name", "PotentialRegistrationChain")]
+        StosMapNode = VerifyVolume(self, BlockNode, volumechecklist)
+
+        # Add some extra stosmap nodes and make sure they get cleaned up
+
+        ExtraMapNode = volman.MappingNode(4, 10)
+        StosMapNode.append(ExtraMapNode)
+
+        removed = StosMapNode.RemoveDuplicateControlEntries(3)
+        self.assertFalse(removed, "No duplicate should return false")
+
+        removed = StosMapNode.RemoveDuplicateControlEntries(4)
+        self.assertTrue(removed, "Duplicate should be removed and return true")
+
+        listMapFour = StosMapNode.GetMappingsForControl(4)
+        self.assertEqual(len(listMapFour), 1, "Duplicate StosMap was not removed")
+
+        expectedRT = self._GenerateExpectedRT(GoodSections, BadSections, center, adjacentThreshold)
+        expectedRT.AddPair(4, 10)
+
+        ValidateStosMap(self, StosMapNode, expectedRT)
+
+        BannedSections = [4]
+        StosMapNode.ClearBannedControlMappings(BannedSections)
+        listMapFour = StosMapNode.GetMappingsForControl(4)
+        self.assertEqual(len(listMapFour), 0, "Banned section should be removed")
+
+
 
 
 class SliceToSliceRegistrationBruteOnlyTest(test_sectionimage.ImportLMImages):
@@ -96,9 +270,7 @@ class SliceToSliceRegistrationBruteOnlyTest(test_sectionimage.ImportLMImages):
     def testAlignSectionsPipeline(self):
 
         # Import the files
-        buildArgs = ['Build.py', '-volume', self.TestOutputPath, \
-                     '-pipeline', 'AlignSections', \
-                     '-debug', \
+        buildArgs = ['-debug', 'AlignSections', '-volume', self.TestOutputPath, \
                      '-Downsample', '16', \
                      '-Center', '5', \
                      '-Channels', 'LeveledShading.*']
@@ -182,9 +354,8 @@ class SliceToSliceRegistrationSkipBrute(CopySetupTestBase):
         groupNames = ['StosBrute16', 'StosGrid16', 'StosGrid8', 'SliceToVolume8']
 
         # Import the files
-        buildArgs = ['Build.py', '-volume', self.TestOutputPath, \
-                     '-pipeline', 'AlignSections', \
-                     '-debug', \
+        buildArgs = ['-debug', 'AlignSections', '-volume', self.TestOutputPath, \
+                      \
                      '-Downsample', '16', \
                      '-Center', '5', \
                      '-Channels', 'LeveledShading.*']
@@ -196,9 +367,8 @@ class SliceToSliceRegistrationSkipBrute(CopySetupTestBase):
         SixToFiveAutomaticBruteFirstPassTransform = FetchStosTransform(self, self.VolumeObj, 'StosBrute16', 6, 7)
 
         # Try to refine the results
-        FirstRefineBuildArgs = ['Build.py', '-volume', self.TestOutputPath, \
-                     '-pipeline', 'RefineSectionAlignment', \
-                     '-debug', \
+        FirstRefineBuildArgs = ['-debug', 'RefineSectionAlignment', '-volume', self.TestOutputPath, \
+                      \
                      '-Filter', '.*mosaic.*', \
                      '-InputGroup', 'StosBrute', \
                      '-InputDownsample', '16', \
@@ -218,13 +388,17 @@ class SliceToSliceRegistrationSkipBrute(CopySetupTestBase):
 #                         "InputChecksum of first pass refine transform should match checksum of brute transform")
 
         # Try to scale the transforms to full size
-        ScaleArgs = ['Build.py', '-volume', self.TestOutputPath, \
-                             '-pipeline', 'ScaleVolumeTransforms', 'VolumeImage', \
-                             '-debug', \
+        ScaleArgs = ['-debug', 'ScaleVolumeTransforms', '-volume', self.TestOutputPath, \
                              '-InputGroup', 'StosGrid', \
                              '-InputDownsample', '16', \
                              '-OutputDownsample', '1']
         self.VolumeObj = self.RunBuild(ScaleArgs)
+
+        VolumeImageArgs = ['-debug', 'VolumeImage', '-volume', self.TestOutputPath, \
+                     '-InputGroup', 'StosGrid', \
+                     '-InputDownsample', '16']
+        self.VolumeObj = self.RunBuild(VolumeImageArgs)
+
         ScaleAndVolumeImageGroupNode = self.VolumeObj.find("Block/StosGroup[@Name='StosGrid1']")
         self.assertIsNotNone(ScaleAndVolumeImageGroupNode, "Could not find StosGroup " + groupNames[1])
 
@@ -233,9 +407,7 @@ class SliceToSliceRegistrationSkipBrute(CopySetupTestBase):
         self.ValidateTransforms(AutoInputTransform=SixToFiveAutomaticGridFirstPassTransform,
                                 AutoOutputTransform=ScaledTransformFromSixteen)
 
-        VolumeImagesArgs = ['Build.py', '-volume', self.TestOutputPath, \
-                             '-pipeline', 'VolumeImage', \
-                             '-debug', \
+        VolumeImagesArgs = ['-debug', 'VolumeImage', '-volume', self.TestOutputPath, \
                              '-InputGroup', 'StosGrid', \
                              '-InputDownsample', '1']
         self.VolumeObj = self.RunBuild(VolumeImagesArgs)
@@ -243,9 +415,7 @@ class SliceToSliceRegistrationSkipBrute(CopySetupTestBase):
         self.assertIsNotNone(VolumeImageNode)
 
         # Try to refine the of stos-grid
-        SecondRefineBuildArgs = ['Build.py', '-volume', self.TestOutputPath, \
-                     '-pipeline', 'RefineSectionAlignment', \
-                     '-debug', \
+        SecondRefineBuildArgs = ['-debug', 'RefineSectionAlignment', '-volume', self.TestOutputPath, \
                      '-InputGroup', 'StosGrid', \
                      '-Filter', '.*mosaic.*', \
                      '-InputDownsample', '16', \
@@ -266,12 +436,9 @@ class SliceToSliceRegistrationSkipBrute(CopySetupTestBase):
         # "InputChecksum of second pass transform should match checksum of first pass transform")
 
         # Try to refine the of stos-grid
-        SliceToVolumeBuildArgs = ['Build.py', '-volume', self.TestOutputPath, \
-                     '-pipeline', 'SliceToVolume', \
-                     '-debug', \
+        SliceToVolumeBuildArgs = ['-debug', 'SliceToVolume', '-volume', self.TestOutputPath, \
                      '-InputGroup', 'StosGrid', \
-                     '-InputDownsample', '8', \
-                     '-OutputDownsample', '8']
+                     '-InputDownsample', '8']
         self.VolumeObj = self.RunBuild(SliceToVolumeBuildArgs)
 
         SixToFiveAutomaticSliceToVolumeTransform = FetchStosTransform(self, self.VolumeObj, 'SliceToVolume8', 5, 7)
@@ -361,9 +528,7 @@ class SliceToSliceRegistrationSkipBrute(CopySetupTestBase):
 
 ###################
 
-        SliceToVolumeScaleArgs = ['Build.py', '-volume', self.TestOutputPath, \
-                             '-pipeline', 'ScaleVolumeTransforms', \
-                             '-debug', \
+        SliceToVolumeScaleArgs = ['-debug', 'ScaleVolumeTransforms', '-volume', self.TestOutputPath, \
                              '-InputGroup', 'SliceToVolume', \
                              '-InputDownsample', '8', \
                              '-OutputDownsample', '1']
@@ -376,25 +541,20 @@ class SliceToSliceRegistrationSkipBrute(CopySetupTestBase):
         self.ValidateTransforms(AutoInputTransform=SixToFiveRebuiltFromManualSliceToVolumeTransform,
                                 AutoOutputTransform=SliceToVolumeScaleTransformFromEight)
 
-        SliceToVolumeImagesArgs = ['Build.py', '-volume', self.TestOutputPath, \
-                             '-pipeline', 'VolumeImage', \
-                             '-debug', \
-                             '-InputGroup', 'SliceToVolume', \
-                             '-InputDownsample', '1']
+        SliceToVolumeImagesArgs = ['-debug', 'VolumeImage', '-volume', self.TestOutputPath, \
+                                 '-InputGroup', 'SliceToVolume', \
+                                 '-InputDownsample', '1']
         self.VolumeObj = self.RunBuild(SliceToVolumeImagesArgs)
         # SliceToVolumeScaleAndVolumeImageGroupNode = self.VolumeObj.find("Block/StosGroup[@Name='SliceToVolume1']")
         # self.assertIsNotNone(SliceToVolumeScaleAndVolumeImageGroupNode, "Could not find StosGroup SliceToVolume1")
 
     def testBlob(self):
-        buildArgs = ['Build.py', '-volume', self.TestOutputPath,
-                                 '-pipeline', 'CreateBlobFilter',
-                                 '-debug', \
+        buildArgs = ['-debug', 'CreateBlobFilter', '-volume', self.TestOutputPath, \
                                  '-InputFilter', 'mosaic',
                                  '-OutputFilter', 'Blob_mosaic',
                                  '-Radius', '1',
                                  '-Median', '1',
-                                 '-Levels', '1,4',
-                                 '-debug']
+                                 '-Levels', '1,4']
 
         VolumeObj = self.RunBuild(buildArgs)
         BlobFilterNode = VolumeObj.find('Block/Section/Channel/Filter[@Name="Blob_mosaic"]')

@@ -16,6 +16,7 @@ import VolumeManagerHelpers as VMH
 import nornir_buildmanager.Config as Config
 import nornir_buildmanager.operations.versions as versions
 import nornir_buildmanager.operations.tile as tile
+import nornir_imageregistration.transforms.registrationtree
 from nornir_imageregistration.files import *
 import nornir_shared.checksum
 import nornir_shared.misc as misc
@@ -390,6 +391,17 @@ class XElementWrapper(ElementTree.Element):
     @Version.setter
     def Version(self, Value):
         self.attrib['Version'] = str(Value)
+
+
+    @property
+    def Root(self):
+        '''The root of the element tree'''
+        node = self
+        while not node.Parent is None:
+            node = node.Parent
+
+        return node
+
 
     @property
     def Parent(self):
@@ -1403,6 +1415,22 @@ class FilterNode(XContainerElementWrapper):
         self.attrib['BitsPerPixel'] = '%d' % val
 
     @property
+    def Locked(self):
+        if 'Locked' in self.attrib:
+            return bool(int(self.attrib['Locked']))
+
+        return False;
+
+    @Locked.setter
+    def Locked(self, val):
+        if not val:
+            if 'Locked' in self.attrib:
+                del self.attrib['Locked']
+                return
+
+        self.attrib['Locked'] = '%d' % val
+
+    @property
     def TilePyramid(self):
         # pyramid = self.GetChildByAttrib('TilePyramid', "Name", TilePyramidNode.Name)
         # There should be only one Imageset, so use find
@@ -1678,11 +1706,22 @@ class StosMapNode(XElementWrapper):
 
     @property
     def CenterSection(self):
-        return int(self.attrib['CenterSection'])
+        if 'CenterSection' in self.attrib:
+            val = self.attrib['CenterSection']
+            if len(val) == 0:
+                return None
+            else:
+                return int(val)
+
+        return None
 
     @CenterSection.setter
     def CenterSection(self, val):
-        self.attrib['CenterSection'] = str(val)
+        if val is None:
+            self.attrib['CenterSection'] = ""
+        else:
+            assert(isinstance(val, int))
+            self.attrib['CenterSection'] = str(val)
 
     @property
     def Mappings(self):
@@ -1700,32 +1739,77 @@ class StosMapNode(XElementWrapper):
 
         return MappedToControlCandidateList
 
+    def GetMappingsForControl(self, Control):
+        mappings = self.findall("Mapping[@Control='" + str(Control) + "']")
+        if mappings is None:
+            return []
+
+        return list(mappings)
+
+    def ClearBannedControlMappings(self, NonStosSectionNumbers):
+        '''Remove any control sections from a mapping which cannot be a control'''
+
+        removed = False
+        for InvalidControlSection in NonStosSectionNumbers:
+            mapNodes = self.GetMappingsForControl(InvalidControlSection)
+            for mapNode in mapNodes:
+                removed = True
+                self.remove(mapNode)
+
+        return removed
+
     @property
     def AllowDuplicates(self):
         return self.attrib.get('AllowDuplicates', True)
 
     def AddMapping(self, Control, Mapped):
         '''Create a mapping to a control section'''
+
+        val = None
+        if isinstance(Mapped, nornir_imageregistration.transforms.registrationtree.RegistrationTreeNode):
+            val = Mapped.SectionNumber
+        elif isinstance(Mapped, int):
+            val = Mapped
+        else:
+            raise TypeError("Mapped should be an int or RegistrationTreeNode")
+
         childMapping = self.GetChildByAttrib('Mapping', 'Control', Control)
         if childMapping is None:
-            childMapping = MappingNode(Control, Mapped)
+            childMapping = MappingNode(Control, val)
             self.append(childMapping)
         else:
-            if not Mapped in childMapping.Mapped:
-                childMapping.AddMapping(Mapped)
-
+            if not val in childMapping.Mapped:
+                childMapping.AddMapping(val)
         return
 
-    def FindControlForMapped(self, MappedSection):
+    def FindAllControlsForMapped(self, MappedSection):
         '''Given a section to be mapped, return the first control section found'''
         for m in self:
             if not m.tag == 'Mapping':
                 continue
 
             if(MappedSection in m.Mapped):
-                return m.Control
+                yield m.Control
 
-        return None
+        return
+
+    def RemoveDuplicateControlEntries(self, Control):
+        '''If there are two entries with the same control number we merge the mapping list and delete the duplicate'''
+
+        mappings = list(self.GetMappingsForControl(Control))
+        if len(mappings) < 2:
+            return False
+
+        mergeMapping = mappings[0]
+        for i in range(1, len(mappings)):
+            mappingNode = mappings[i]
+            for mappedSection in mappingNode.Mapped:
+                mergeMapping.AddMapping(mappedSection)
+
+            self.remove(mappingNode)
+            XElementWrapper.logger.warn('Moving duplicate mapping ' + str(Control) + ' <- ' + str(mappedSection))
+
+        return True
 
     def IsValid(self):
         '''Check for mappings whose control section is in the non-stos section numbers list'''
@@ -1746,9 +1830,16 @@ class StosMapNode(XElementWrapper):
 
         for i in range(len(MappingNodes) - 1, -1, -1):
             Mapping = MappingNodes[i]
+            self.RemoveDuplicateControlEntries(Mapping.Control)
+
+        MappingNodes = list(self.findall('Mapping'))
+
+        for i in range(len(MappingNodes) - 1, -1, -1):
+            Mapping = MappingNodes[i]
+
             if Mapping.Control in NonStosSections:
                 Mapping.Clean()
-                XElementWrapper.logger.warn('Mappings for control section ' + str(Mapping.Control) + ' removed due to existance in NonStosSectionNumbers element')
+                XElementWrapper.logger.warn('Mappings for control section ' + str(Mapping.Control) + ' removed due to existence in NonStosSectionNumbers element')
             else:
                 MappedSections = Mapping.Mapped
                 for i in range(len(MappedSections) - 1, -1, -1):
@@ -1769,7 +1860,10 @@ class StosMapNode(XElementWrapper):
         return super(StosMapNode, self).IsValid()
 
     def __init__(self, Name, attrib=None, **extra):
+
         super(StosMapNode, self).__init__(tag='StosMap', Name=Name, attrib=attrib, **extra)
+
+
 
 
 class MappingNode(XElementWrapper):
@@ -1796,6 +1890,7 @@ class MappingNode(XElementWrapper):
             value.sort()
             AdjacentSectionString = ','.join(str(x) for x in value)
         else:
+            assert(isinstance(value, int))
             AdjacentSectionString = str(value)
 
         self.attrib['Mapped'] = AdjacentSectionString
@@ -1816,11 +1911,17 @@ class MappingNode(XElementWrapper):
         self.Mapped = Mappings
 
 
+    def __str__(self):
+        return "%d <- %s" % (self.Control, str(Mapped))
+
+
     def __init__(self, ControlNumber, MappedNumbers, attrib=None, **extra):
         super(MappingNode, self).__init__(tag='Mapping', attrib=attrib, **extra)
 
         self.attrib['Control'] = str(ControlNumber)
-        self.Mapped = MappedNumbers
+
+        if not MappedNumbers is None:
+            self.Mapped = MappedNumbers
 
 
 class MosaicBaseNode(XFileElementWrapper):
@@ -1952,6 +2053,9 @@ class TransformNode(VMH.InputTransformHandler, MosaicBaseNode):
         valid = VMH.InputTransformHandler.InputTransformIsValid(self)
         if valid:
             return super(TransformNode, self).IsValid()
+
+
+
 
 
 class ImageSetBaseNode(VMH.InputTransformHandler, VMH.PyramidLevelHandler, XContainerElementWrapper):
@@ -2143,6 +2247,46 @@ class SectionMappingsNode(XElementWrapper):
             return t
 
         return None
+
+    @classmethod
+    def _CheckForFilterExistence(self, block, section_number, channel_name, filter_name):
+
+        section_node = block.GetSection(section_number)
+        if section_node is None:
+            return (False, "Transform section not found %d.%s.%s" % (section_number, channel_name, filter_name))
+
+        channel_node = section_node.GetChannel(channel_name)
+        if channel_node is None:
+            return (False, "Transform channel not found %d.%s.%s" % (section_number, channel_name, filter_name))
+
+        filter_node = channel_node.GetFilter(filter_name)
+        if filter_node is None:
+            return (False, "Transform filter not found %d.%s.%s" % (section_number, channel_name, filter_name))
+
+        return (True, None)
+
+
+    def CleanIfInvalid(self):
+        self.CleanTransformsIfInvalid(self)
+        XElementWrapper.CleanIfInvalid(self)
+
+
+    def CleanTransformsIfInvalid(self):
+        block = self.FindParent('Block')
+
+        # Check the transforms and make sure the input data still exists
+        for t in self.Transforms:
+            ControlResult = SectionMappingsNode._CheckForFilterExistence(block, t.ControlSectionNumber, t.ControlChannelName, t.ControlFilterName)
+            if ControlResult[0] == False:
+                prettyoutput.Log("Cleaning transform " + t.Path + " control input did not exist: " + ControlResult[1])
+                t.Clean()
+                continue
+
+            MappedResult = SectionMappingsNode._CheckForFilterExistence(block, t.MappedSectionNumber, t.MappedChannelName, t.MappedFilterName)
+            if MappedResult[0] == False:
+                prettyoutput.Log("Cleaning transform " + t.Path + " mapped input did not exist: " + MappedResult[1])
+                t.Clean()
+                continue
 
 
     def __init__(self, MappedSectionNumber=None, attrib=None, **extra):
