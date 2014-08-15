@@ -34,13 +34,12 @@ __LoadedVolumeXMLDict__ = dict()
 
 def ValidateAttributesAreStrings(Element, logger=None):
 
-    if logger is None:
-        logger = logging.getLogger('VolumeManager')
-
     # Make sure each attribute is a string
     for k, v in enumerate(Element.attrib):
         assert isinstance(v, str)
         if not isinstance(v, str):
+            if logger is None:
+                logger = logging.getLogger(__name__ + '.' + 'ValidateAttributesAreStrings')
             logger.warning("Attribute is not a string")
             Element.attrib[k] = str(v)
 
@@ -329,7 +328,7 @@ class XPropertiesElementWrapper(ElementTree.Element):
 
 class XElementWrapper(ElementTree.Element):
 
-    logger = logging.getLogger('VolumeManager')
+    logger = logging.getLogger(__name__ + '.' + 'XElementWrapper')
 
     def sort(self):
         '''Order child elements'''
@@ -844,7 +843,7 @@ class XElementWrapper(ElementTree.Element):
         # OK, check if we have a linked element to load.
 
         if '\\' in xpath:
-            Logger = logging.getLogger('Volume Manager')
+            Logger = logging.getLogger(__name__ + '.' + '__ElementLinkNameFromXPath')
             Logger.warn("Backslash found in xpath query, is this intentional or should it be a forward slash?")
             Logger.warn("XPath: " + xpath)
 
@@ -995,7 +994,7 @@ class XResourceElementWrapper(XElementWrapper):
                 else:
                     os.remove(self.FullPath)
             except:
-                Logger = logging.getLogger('Volume Manager')
+                Logger = logging.getLogger(__name__ + '.' + 'Clean')
                 Logger.warning('Could not delete cleaned directory: ' + self.FullPath)
                 pass
 
@@ -1149,7 +1148,7 @@ class XContainerElementWrapper(XResourceElementWrapper):
         self.Save(recurse=False)
 
     def LoadSubElement(self, Path):
-        logger = logging.getLogger('VolumeManager')
+        logger = logging.getLogger(__name__ + '.' + 'LoadSubElement')
         Filename = os.path.join(Path, "VolumeData.xml")
         if not os.path.exists(Filename):
             logger.error(Filename + " does not exist")
@@ -1196,19 +1195,21 @@ class XContainerElementWrapper(XResourceElementWrapper):
 
     def Save(self, tabLevel=None, recurse=True):
         '''If recurse = False we only save this element, no child elements are saved'''
-
+        
         if tabLevel is None:
             tabLevel = 0
+            if hasattr(self, 'FullPath'):
+                logger = logging.getLogger(__name__ + '.' + 'Save')
+                logger.info("Saving " + self.FullPath)
 
         self.sort()
 
         # pool = Pools.GetGlobalThreadPool()
+         
+        #tabs = '\t' * tabLevel
 
-        logger = logging.getLogger('VolumeManager')
-        tabs = '\t' * tabLevel
-
-        if hasattr(self, 'FullPath'):
-            logger.info("Saving " + self.FullPath)
+        #if hasattr(self, 'FullPath'):
+        #    logger.info("Saving " + self.FullPath)
 
         # logger.info('Saving ' + tabs + str(self))
         xmlfilename = 'VolumeData.xml'
@@ -1219,7 +1220,7 @@ class XContainerElementWrapper(XResourceElementWrapper):
         if(not self.text is None):
             SaveElement.text = self.text
 
-        ValidateAttributesAreStrings(self, logger)
+        ValidateAttributesAreStrings(self)
 
         # SaveTree = ElementTree.ElementTree(SaveElement)
 
@@ -1243,7 +1244,7 @@ class XContainerElementWrapper(XResourceElementWrapper):
                 # self.append(LinkElement)
             else:
                 if isinstance(SaveElement, XElementWrapper):
-                    ValidateAttributesAreStrings(SaveElement, logger)
+                    ValidateAttributesAreStrings(SaveElement)
                     SaveElement.sort()
 
                 SaveElement.append(child)
@@ -1299,9 +1300,9 @@ class XLinkedContainerElementWrapper(XContainerElementWrapper):
 
         # pool = Pools.GetGlobalThreadPool()
 
-        logger = logging.getLogger('VolumeManager')
+        logger = logging.getLogger(__name__ + '.' + 'XLinkedContainerElementWrapper')
         tabs = '\t' * tabLevel
-        logger.info('Saving ' + tabs + str(self))
+        #logger.info('Saving ' + tabs + str(self))
         xmlfilename = 'VolumeData.xml'
         # Create a copy of ourselves for saving
         SaveElement = ElementTree.Element(self.tag, attrib=self.attrib)
@@ -1376,6 +1377,8 @@ class ChannelNode(XContainerElementWrapper):
                                    'Name',
                                     filterPattern)
 
+    def GetTransform(self, transform_name):
+        return self.GetChildByAttrib('Transform', 'Name', transform_name)
 
     def __init__(self, Name, Path, attrib=None, **extra):
         super(ChannelNode, self).__init__(tag='Channel', Name=Name, Path=Path, attrib=attrib, **extra)
@@ -1947,12 +1950,21 @@ class MosaicBaseNode(XFileElementWrapper):
 
         return None
 
+    def ResetChecksum(self):
+        '''Recalculate the checksum for the element'''
+        if 'Checksum' in self.attrib:
+            del self.attrib['Checksum']
+
+        self.attrib['Checksum'] = self._CalcChecksum()
+
     @property
     def Checksum(self):
         '''Checksum of the file resource when the node was last updated'''
         checksum = self.attrib.get('Checksum', None)
         if checksum is None:
-            return self._CalcChecksum()
+            checksum = self._CalcChecksum()
+            self.attrib['Checksum'] = checksum
+            return checksum
 
         return checksum
 
@@ -1960,6 +1972,7 @@ class MosaicBaseNode(XFileElementWrapper):
     def Checksum(self, val):
         '''Checksum of the file resource when the node was last updated'''
         self.attrib['Checksum'] = val
+        raise DeprecationWarning("Checksums for mosaic elements will not be directly settable soon.  Use ResetChecksum instead")
 
     def IsValid(self):
 
@@ -2031,6 +2044,15 @@ class TransformNode(VMH.InputTransformHandler, MosaicBaseNode):
             return nornir_shared.misc.ListFromAttribute(self.attrib['CropBox'])
         else:
             return None
+
+    def CropBoxDownsampled(self, downsample):
+        (Xo, Yo, Width, Height) = self.CropBox
+        Xo = Xo // float(downsample)
+        Yo = Yo // float(downsample)
+        Width = math.ceil(Width / float(downsample))
+        Height = math.ceil(Height / float(downsample))
+
+        return (Xo, Yo, Width, Height)
 
     @CropBox.setter
     def CropBox(self, bounds):

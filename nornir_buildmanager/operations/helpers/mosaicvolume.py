@@ -26,7 +26,7 @@ class MosaicVolume(volume.Volume):
 
             mosaicObj.transformNode = transform
 
-            sectionKey = "%s_%s" % (Section.Name, Channel.Name)
+            sectionKey = "%d_%s" % (Section.Number, Channel.Name)
 
             vol.AddSection(sectionKey, mosaicObj)
 
@@ -40,4 +40,5 @@ class MosaicVolume(volume.Volume):
 
             mosaicObj.SaveToMosaicFile(transformNode.FullPath)
 
-            transformNode.Checksum = mosaicfile.MosaicFile.LoadChecksum(transformNode.FullPath)
+            transformNode.ResetChecksum()
+            # transformNode.Checksum = mosaicfile.MosaicFile.LoadChecksum(transformNode.FullPath)
