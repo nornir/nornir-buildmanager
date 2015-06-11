@@ -1,15 +1,11 @@
 '''
+  
+*Note*: Certain arguments support regular expressions.  See the python :py:mod:`re` module for instructions on how to construct appropriate regular expressions.
 
---------------------
-Command line usage
---------------------
-
-Note: Certain arguments support regular expressions.  See the python :py:mod:`re` module for instructions on how to construct appropriate regular expressions.
-
-.. argparse:: 
+.. argparse::
    :module: nornir_buildmanager.build
    :func: BuildParserRoot
-   :prog: nornir_build
+   :prog: nornir_build volumepath
 
 '''
 
@@ -28,64 +24,27 @@ from nornir_imageregistration.files import *
 from pkg_resources import resource_filename
 
 CommandParserDict = {}
-
-
+ 
 def ConfigDataPath():
     return resource_filename(__name__, 'config')
 
-#     try:
-#         path = os.path.dirname(__file__)
-#     except:
-#         path = os.getcwd()
-#
-#     return os.path.join(path, 'con fig')
-
-
-# def _BuildPipelineParser(parser):
-
-#     parser.add_argument('-update',
-#                         action='store_true',
-#                         required=False,
-#                         default=False,
-#                         help='If directories have been copied directly into the volume this flag is required to detect them',
-#                         dest='update'
-#                         )
-#
-#     parser.add_argument('-pipeline',
-#                         action='store',
-#                         required=False,
-#                         default=None,
-#                         nargs='+',
-#                         type=str,
-#                         help='The names of the pipeline to use',
-#                         dest='pipelinenames'
-#                         )
-
-def _BuildImportParser(parser):
-    parser.add_argument('inputpath',
-                        metavar='import',
-                        action='store',
-                        type=str,
-                        default=None,
-                        help='The path of data to import, if any',
-                        )
-
-    parser.set_defaults(func=call_importer)
-
 
 def AddVolumeArgumentToParser(parser):
-    parser.add_argument('-volume',
+    parser.add_argument('volumepath',
                         action='store',
-                        required=True,
-                        default=None,
                         type=str,
                         help='The path to the volume',
-                        dest='volumepath'
                         )
 
 
 def _AddParserRootArguments(parser):
-
+    
+    parser.add_argument('volumepath',
+                        action='store',
+                        type=str,
+                        help='Directory containing volume to execute command on',
+                        )
+    
     parser.add_argument('-debug',
                         action='store_true',
                         required=False,
@@ -93,13 +52,12 @@ def _AddParserRootArguments(parser):
                         help='If true any exceptions raised by pipelines are not handled.',
                         dest='debug')
 
-
-    parser.add_argument('-normalpriority', '-np',
+    parser.add_argument('-lowpriority', '-lp',
                         action='store_true',
                         required=False,
                         default=False,
-                        help='Run the build without trying to lower the priority.  Faster builds but the machine may be less responsive.',
-                        dest='normpriority')
+                        help='Run the build with lower priority.  The machine may be more responsive at the expense of much slower builds. 3x-5x slower in tests.',
+                        dest='lowpriority')
 
     parser.add_argument('-verbose',
                         action='store_true',
@@ -108,67 +66,32 @@ def _AddParserRootArguments(parser):
                         help='Provide additional output',
                         dest='verbose')
 
-
-#     parser.add_argument('-pipelinexml',
-#                         action='store',
-#                         required=False,
-#                         default='Pipelines.xml',
-#                         type=str,
-#                         help='The path to the xml file containing the pipeline XML file',
-#                         dest='pipelinexmlpath'
-#                         )
-#
-#     parser.add_argument('-importmapxml',
-#                         action='store',
-#                         required=False,
-#                         type=str,
-#                         default='Importers.xml',
-#                         help='The importer XML file to use',
-#                         dest='importmapxmlpath'
-#                         )
-
 def _GetPipelineXMLPath():
     return os.path.join(ConfigDataPath(), 'Pipelines.xml')
-
-def _GetImporterXMLPath():
-    return os.path.join(ConfigDataPath(), 'Importers.xml')
 
 def BuildParserRoot():
 
     # conflict_handler = 'resolve' replaces old arguments with new if both use the same option flag
     parser = argparse.ArgumentParser('Buildscript', conflict_handler='resolve', description='Options available to all build commands.  Specific pipelines may extend the argument list.')
-
-
-
-    subparsers = parser.add_subparsers(title='help')
-    help_parser = subparsers.add_parser('help', help='Print help information')
-
-    help_parser.set_defaults(func=print_help, parser=parser)
-    help_parser.add_argument('pipelinename',
-                        default=None,
-                        nargs='?',
-                        type=str,
-                        help='Print help for a pipeline, or all pipelines if unspecified')
-
-    CommandParserDict['help'] = help_parser
-
-    import_parser = subparsers.add_parser('import', help='Import new data into a volume')
-    AddVolumeArgumentToParser(import_parser)
-    _BuildImportParser(import_parser)
-
-    CommandParserDict['import'] = import_parser
-
-    update_parser = subparsers.add_parser('update', help='If directories have been copied directly into the volume this flag is required to detect them')
-    AddVolumeArgumentToParser(update_parser)
-
-    _AddPipelineParsers(subparsers)
-
-    # pipeline_parser = subparsers.add_parser('pipeline', dest='pipeline')
-    # _BuildPipelineParser(pipeline_parser)
-
     _AddParserRootArguments(parser)
 
-    # parser.add_argument('args', nargs=argparse.REMAINDER)
+    #subparsers = parser.add_subparsers(title='help')
+    #help_parser = subparsers.add_parser('help', help='Print help information')
+# 
+    #help_parser.set_defaults(func=print_help, parser=parser)
+    #help_parser.add_argument('pipelinename',
+                        #default=None,
+                        #nargs='?',
+                        #type=str,
+                        #help='Print help for a pipeline, or all pipelines if unspecified')
+
+    #CommandParserDict['help'] = help_parser
+
+    #update_parser = subparsers.add_parser('update', help='If directories have been copied directly into the volume this flag is required to detect them')
+    
+    pipeline_subparsers = parser.add_subparsers(title='Commands')
+    _AddPipelineParsers(pipeline_subparsers)
+    
     return parser
 
 
@@ -178,9 +101,7 @@ def _AddPipelineParsers(subparsers):
     for pipeline_name in pipelinemanager.PipelineManager.ListPipelines(PipelineXML):
         pipeline = pipelinemanager.PipelineManager.Load(PipelineXML, pipeline_name)
 
-        pipeline_parser = subparsers.add_parser(pipeline_name, help=pipeline.Description, description=pipeline.Description, epilog=pipeline.Epilog)
-
-        AddVolumeArgumentToParser(pipeline_parser)
+        pipeline_parser = subparsers.add_parser(pipeline_name, help=pipeline.Description, epilog=pipeline.Epilog)
 
         pipeline.GetArgParser(pipeline_parser, IncludeGlobals=True)
 
@@ -192,8 +113,7 @@ def _AddPipelineParsers(subparsers):
 def print_help(args):
 
     if args.pipelinename is None:
-        args.parser.print_help()
-        # pipelinemanager.PipelineManager.PrintPipelineEnumeration(_GetPipelineXMLPath())
+        args.parser.print_help() 
     elif args.pipelinename in CommandParserDict:
         parser = CommandParserDict[args.pipelinename]
         parser.print_help()
@@ -203,17 +123,6 @@ def print_help(args):
 def call_update(args):
     volumeObj = VolumeManagerETree.load(args.volumepath)
     volumeObj.UpdateSubElements()
-
-def call_importer(args):
-
-    ImporterXMLPath = _GetImporterXMLPath()
-    print "Loading import map: " + ImporterXMLPath
-    Importer = ImportManager.ImportManager.Load(ImporterXMLPath)
-    if(Importer is None):
-        prettyoutput.LogErr("Specified Importer.xml not found: " + args.importmapxmlpath)
-        sys.exit()
-
-    Importer.ConvertAll(args.inputpath, args.volumepath)
 
 def call_pipeline(args):
     pipelinemanager.PipelineManager.RunPipeline(PipelineXmlFile=args.PipelineXmlFile, PipelineName=args.PipelineName, args=args)
@@ -247,98 +156,37 @@ def Execute(buildArgs=None):
 
     InitLogging(buildArgs)
 
-    # print "Current Working Directory: " + os.getcwd()
-
-    vikingURL = ""
-
-    dargs = dict()
-    # dargs.update(args.__dict__)
-
-    TimingOutput = 'Timing.txt'
-
     Timer = TaskTimer()
 
     parser = BuildParserRoot()
 
     args = parser.parse_args(buildArgs)
-
-    PipelineXML = _GetPipelineXMLPath()
-
-    if not args.normpriority:
+   
+    if args.lowpriority:
+        
         lowpriority()
-
+        print("Warning, using low priority flag.  This can make builds much slower")
+        
     # SetupLogging(args.volumepath)
-
-    try:
-        Timer.Start('Total Runtime')
-
-#        Timer.Start('ADoc To Mosaic')
-
-#         Importer = None
-#         if not args.inputpath is None:
-#             ImporterXMLPath = os.path.join(ConfigDataPath(), args.importmapxmlpath)
-#             print "Loading import map: " + ImporterXMLPath
-#             Importer = ImportManager.ImportManager.Load(ImporterXMLPath)
-#             if(Importer is None):
-#
-#                 prettyoutput.LogErr("Specified Importer.xml not found: " + args.importmapxmlpath)
-#                 sys.exit()
-#
-#             Importer.ConvertAll(args.inputpath, args.volumepath)
+    
+    try:  
+        Timer.Start(args.PipelineName)
 
         args.func(args)
 
-#         if args.pipelinenames is None:
-#             return
-#
-#         for pipelinename in args.pipelinenames:
-#
-#             pipeline = pipelinemanager.PipelineManager.Load(PipelineXMLPath, pipelinename)
-#             pipeline.Execute(parser, buildArgs)
-
-
-
+        Timer.End(args.PipelineName)
+        
+  
     finally:
         OutStr = str(Timer)
         prettyoutput.Log(OutStr)
+        timeTextFullPath = os.path.join(args.volumepath, 'Timing.txt') 
         try:
-            OutputFile = open(os.path.join(args.volumepath, 'Timing.txt'), 'w')
-            OutputFile.writelines(OutStr)
-            OutputFile.close()
+            with open(timeTextFullPath, 'w+') as OutputFile:
+                OutputFile.writelines(OutStr)
+                OutputFile.close()
         except:
-            prettyoutput.Log('Could not write timing.txt')
-
-#
-# def SetupLogging(OutputPath):
-#
-#    LogPath = os.path.join(OutputPath, 'Logs')
-#
-#    if not os.path.exists(LogPath):
-#        os.makedirs(LogPath)
-#
-#    formatter = logging.Formatter('%(levelname)s - %(name)s - %(message)s')
-#
-#    logFileName = time.strftime('log-%M.%d.%y_%H.%M.txt', time.localtime())
-#    logFileName = os.path.join(LogPath, logFileName)
-#    errlogFileName = time.strftime('log-%M.%d.%y_%H.%M-Errors.txt', time.localtime())
-#    errlogFileName = os.path.join(LogPath, errlogFileName)
-#    logging.basicConfig(filename=logFileName, level='DEBUG', format='%(levelname)s - %(name)s - %(message)s')
-#
-#    eh = logging.FileHandler(errlogFileName)
-#    eh.setLevel(logging.INFO)
-#    eh.setFormatter(formatter)
-#
-#    ch = logging.StreamHandler()
-#    ch.setLevel(logging.WARNING)
-#    ch.setFormatter(formatter)
-#
-#    logger = logging.getLogger()
-#    logger.addHandler(eh)
-#    logger.addHandler(ch)
-#
-#    eh.setFormatter(formatter)
-
-
+            prettyoutput.Log('Could not write %s' % (timeTextFullPath))
 
 if __name__ == '__main__':
     Execute()

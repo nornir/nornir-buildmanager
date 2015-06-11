@@ -10,6 +10,7 @@ import shutil
 import unittest
 import time
 
+import nornir_buildmanager.importers
 from nornir_buildmanager.VolumeManagerETree import VolumeManager 
 import nornir_buildmanager.build as build
 from nornir_buildmanager.importers.idoc import SerialEMLog
@@ -38,34 +39,6 @@ class IDocTest(setup_pipeline.PlatformTest):
     @property
     def Grid32ManualStosFullPath(self):
         return os.path.join(self.PlatformFullPath, "IDocBuildTest_Grid32Manual")
-
-#    def setUp(self):
-#
-#        '''Imports a PMG volume and stops, tests call pipeline functions'''
-#        TestBaseDir = os.getcwd()
-#        if 'TESTDIR' in os.environ:
-#            TestBaseDir = os.environ["TESTDIR"]
-#
-#        self.PlatformFullPath = os.path.join(os.getcwd(), "test/data/PlatformRaw/IDoc")
-#        self.VolumeFullPath = os.path.join(TestBaseDir, "TestOutput", self.classname)
-#
-#        self.assertTrue(os.path.exists(self.PlatformFullPath), "Test input does not exist")
-#
-#        self.idocDirs = nornir_shared.Files.RecurseSubdirectories(self.PlatformFullPath, "*.idoc")
-#        self.assertTrue(len(self.idocDirs) > 0, "No test input found")
-#
-#        #Remove output of earlier tests
-#        if os.path.exists(self.VolumeFullPath):
-#            shutil.rmtree(self.VolumeFullPath)
-#
-#        nornir_shared.Misc.SetupLogging(os.path.join(TestBaseDir, 'Logs', self.classname))
-#        self.Logger = logging.getLogger(self.classname)
-
-#    def tearDown(self):
-#
-#        if os.path.exists(self.VolumeFullPath):
-#            shutil.rmtree(self.VolumeFullPath)
-#
 
 
 class StosRebuildHelper(object):
@@ -212,7 +185,7 @@ class StosRebuildHelper(object):
         last_modified_dict = setup_pipeline.BuildPathToModifiedDateMap(full_transform_paths)
            
         updatedVolumeObj = func(**func_args_dict)
-          
+
         return self._EnsureStosGroupTransformsRefreshed(volumeObj=updatedVolumeObj, 
                                                stos_group_name=stos_group_name,
                                                originalTransformList=transformList,
@@ -283,11 +256,15 @@ class IDocSingleSectionImportTest(IDocTest):
 
     @property
     def VolumePath(self):
-        return "RC2_Micro/%d" % self.SectionNumber
+        return "RC2_Micro\\%d" % self.SectionNumber
 
     @property
     def SectionNumber(self):
         return 17
+    
+    @property
+    def HistogramFullPath(self):
+        return os.path.join(self.ImportedDataPath, nornir_buildmanager.importers.DefaultHistogramFilename)
 
     def LoadMetaData(self):
         '''Updates the object's meta-data variables from disk'''
@@ -297,6 +274,7 @@ class IDocSingleSectionImportTest(IDocTest):
 
         self.ChannelData = self.VolumeObj.find("Block/Section[@Number='17']/Channel")
         self.assertIsNotNone(self.ChannelData, "Could not locate channel meta-data")
+        self.RawFilterObj = self._getRawDataFilterNode(self.SectionNumber)
 
         # OK, by default the transforms should be correct
         self.StageTransform = self.ChannelData.GetChildByAttrib('Transform', 'Name', 'Stage')
@@ -311,8 +289,15 @@ class IDocSingleSectionImportTest(IDocTest):
 #        self.assertIsNotNone(self.GridTransform)
 #        self.assertIsNotNone(self.ZeroGridTransform)
 
-    def _getFilterNode(self, BlockNode, SectionNumber):
-        SectionNode = BlockNode.GetSection(SectionNumber)
+    @property
+    def Block(self):
+        block = self.VolumeObj.find('Block')
+        self.assertIsNotNone(block)
+        return block
+    
+
+    def _getRawDataFilterNode(self, SectionNumber):
+        SectionNode = self.Block.GetSection(SectionNumber)
         self.assertIsNotNone(SectionNode)
 
         ChannelNode = SectionNode.GetChannel('TEM')
@@ -322,15 +307,27 @@ class IDocSingleSectionImportTest(IDocTest):
         self.assertIsNotNone(FilterNode)
 
         return FilterNode
+    
+    def CreateImportContrastOverrideMapping(self, sectionNumber, MinVal, MaxVal, Gamma):
+        ContrastMap = {}        
+        ContrastMap[sectionNumber] = nornir_buildmanager.importers.ContrastValues(sectionNumber, MinVal, MaxVal, Gamma)
+        return ContrastMap 
+    
+    def VerifyFilterContrast(self, MinVal, MaxVal, Gamma):
+        FilterObj = self._getRawDataFilterNode(self.SectionNumber)
+        self.assertIsNotNone(FilterObj)
+        
+        self.assertFalse(FilterObj.IsContrastMismatched(MinVal, MaxVal, Gamma))
 
     def runTest(self):
-
+         
         self.RunImport()
         self.LoadMetaData()
 
         SectionNodes = list(self.VolumeObj.findall("Block/Section"))
         self.assertEqual(len(SectionNodes), 1)
-
+        
+        
         IDocData = self.ChannelData.GetChildByAttrib('Data', 'Name', 'IDoc')
         self.assertIsNotNone(IDocData)
 
@@ -339,12 +336,69 @@ class IDocSingleSectionImportTest(IDocTest):
 
         BlockNode = self.VolumeObj.find('Block')
         self.assertIsNotNone(BlockNode)
+        
+        FilterObj = self._getRawDataFilterNode(self.SectionNumber)
+        self.assertIsNotNone(FilterObj)
+        
+        OriginalMaxIntensity = FilterObj.MaxIntensityCutoff
+        OriginalMinIntensity = FilterObj.MinIntensityCutoff
+        OriginalGamma = FilterObj.Gamma
+        
+        TargetMinIntensity = 1500
+        TargetMaxIntensity = 6000
+        TargetGamma = 1.0
+        
+        ContrastMap = self.CreateImportContrastOverrideMapping(self.SectionNumber, TargetMinIntensity, TargetMaxIntensity, Gamma=TargetGamma)
 
-        self.EnsureTilePyramidIsFull(self._getFilterNode(BlockNode, self.SectionNumber), 25)
+        # Make sure we have images and mosaics for the original imported data.  We want to make sure these are regenerated after the second import.
+        self.RunHistogram(Transform='Stage')
+        self.LoadMetaData() 
+        
+        #histogramNode = self.RawFilterObj.GetHistogram()
+        #self.assertFalse(histogramNode.IsContrastMismatched(OriginalMinIntensity, OriginalMaxIntensity, OriginalGamma))
+        self.RunAdjustContrast(Transform='Stage')
+        
+        # I do not run mosaic based on the prune transform both to save time and to ensure that rebuilding the prune transform is not rebuilding the mosaic and images by some side-effect
+        self.RunMosaic(Filter='Leveled', Transform='Stage')
+        self.LoadMetaData()
+        
+        #self.assertFalse(self.RawFilterObj.TilePyramid.IsContrastMismatched(OriginalMinIntensity, OriginalMaxIntensity, OriginalGamma))
+        #self.assertFalse(self.RawFilterObj.Imageset.IsContrastMismatched(OriginalMinIntensity, OriginalMaxIntensity, OriginalGamma))         
+        self.EnsureTilePyramidIsFull(self.RawFilterObj, 25)
 
         self.RunSetFilterLocked(str(self.SectionNumber), Channels="TEM", Filters="Raw8", Locked="1")
+        
+        
+        nornir_buildmanager.importers.SaveHistogramCutoffs(self.HistogramFullPath, ContrastMap)
+        
+        self.RunImport()
+        self.LoadMetaData()
+        self.VerifyFilterContrast(OriginalMinIntensity, OriginalMaxIntensity, OriginalGamma)
+        
         self.RunSetFilterLocked(str(self.SectionNumber), Channels="TEM", Filters="Raw8", Locked="0")
-
+        
+        self.RunImport()
+        self.LoadMetaData() 
+        self.VerifyFilterContrast(TargetMinIntensity, TargetMaxIntensity, Gamma=TargetGamma)
+        
+        #Check that the histogram has the new target values
+        self.RunHistogram()
+        self.LoadMetaData() 
+        #self.assertFalse(self.RawFilterObj.GetHistogram().IsContrastMismatched(TargetMinIntensity, TargetMaxIntensity, TargetGamma))
+        
+        self.RunAdjustContrast(Transform='Stage')
+        self.RunMosaic(Filter='Leveled', Transform='Stage')
+        
+        self.LoadMetaData() 
+        #self.assertFalse(self.RawFilterObj.Imageset.IsContrastMismatched(TargetMinIntensity, TargetMaxIntensity, TargetGamma)) 
+        
+        
+        
+    def tearDown(self):
+        IDocTest.tearDown(self)
+        if os.path.exists(self.HistogramFullPath):
+            os.remove(self.HistogramFullPath)
+          
 
 # class IDocAlignOutputTest(setup_pipeline.CopySetupTestBase):
 #     '''Attemps an alignment on a cached copy of the output from IDocBuildTest'''
@@ -367,133 +421,139 @@ class IDocSingleSectionImportTest(IDocTest):
 #         self.RunCreateVikingXML()
 #        self.RunAssembleMosaicToVolume(Channels="TEM")
 #===============================================================================
-     
+#      
+   
 class IDocBuildTest(IDocTest, StosRebuildHelper):
-     
+          
     def runTest(self):
-     
+          
         self.RunImport()
         self.RunPrune()
-     
+          
         self.RunSetPruneCutoff(Value="7.5", Section="693", Channels="*", Filters="Raw8")
-     
+          
         self.RunHistogram()
-     
+          
         self.RunSetContrast(MinValue="125", MaxValue="NaN", GammaValue="NaN", Section="693", Channels="*", Filters="Raw8")
-     
+          
         self.RunAdjustContrast()
-     
+          
         self.RemoveAndRegenerateTile(RegenFunction=self.RunAdjustContrast, RegenKwargs={'Sections' : 691}, section_number=691, channel='TEM', filter='Leveled', level=1)
         self.RemoveAndRegenerateTile(RegenFunction=self.RunAdjustContrast, RegenKwargs={'Sections' : 691}, section_number=691, channel='TEM', filter='Leveled', level=2)  
         self.RemoveAndRegenerateTile(RegenFunction=self.RunAdjustContrast, RegenKwargs={'Sections' : 691}, section_number=691, channel='TEM', filter='Leveled', level=4)       
-             
+                  
         self.RunSetFilterLocked('693', Channels="TEM", Filters="Leveled", Locked="1")
         self.RunSetFilterLocked('693', Channels="TEM", Filters="Leveled", Locked="0")
-     
+          
         self.RunMosaic(Filter="Leveled")
         self.RunMosaicReport()
-        self.RunAssemble(Levels=[8,16])
-             
+        self.RunAssemble(Channels='TEM', Levels=[8,16])
+                  
         self.RunCreateVikingXML(StosGroup=None, StosMap=None, OutputFile="Mosaic")
         self.RunMosaicReport()
-     
+          
         # Copy output here to run IDocAlignTest
-     
+          
         BruteLevel = 32
-     
+          
         self.RunCreateBlobFilter(Channels="TEM", Filter="Leveled", Levels="8,16,%d" % (BruteLevel))
         self.RunAlignSections(Channels="TEM", Filters="Blob", Levels=BruteLevel, Center=693)
-             
+                  
         self.RunAssembleStosOverlays(Group="StosBrute", Downsample=BruteLevel, StosMap='PotentialRegistrationChain')
         self.RunSelectBestRegistrationChain(Group="StosBrute", Downsample=BruteLevel, InputStosMap='PotentialRegistrationChain', OutputStosMap='FinalStosMap')
-             
+                  
         self.RunRefineSectionAlignment(InputGroup="StosBrute", InputLevel=BruteLevel, OutputGroup="Grid", OutputLevel=BruteLevel, Filter="Leveled")
         self.RunRefineSectionAlignment(InputGroup="Grid", InputLevel=BruteLevel, OutputGroup="Grid", OutputLevel=BruteLevel / 4, Filter="Leveled")
-     
+          
         # Copy output here to run IDocAlignOutputTest
-     
+          
         self.RunScaleVolumeTransforms(InputGroup="Grid", InputLevel=BruteLevel / 4, OutputLevel=1)
         self.RunSliceToVolume()
         self.RunMosaicToVolume()
         self.RunCreateVikingXML(StosGroup='SliceToVolume1', StosMap='SliceToVolume', OutputFile="SliceToVolume")
         self.RunAssembleMosaicToVolume(Channels="TEM")
         self.RunMosaicReport(OutputFile='VolumeReport')
-        self.RunExportImages(Channels="Registered", Filters="Leveled", AssembleLevel=16) 
+        self.RunExportImages(Channels="Registered", Filters="Leveled", AssembleLevel=16)
  
+        self.RunAssemble(Channels='TEM', Levels=[1])
+        self.RunExportImages(Channels="TEM", Filters="Leveled", AssembleLevel=1, Output="MosaicExport")
+      
+        #TODO, this failed.  Fix it
         self.ForceStosRebuild(self.Grid32ManualStosFullPath, BruteLevel)
-#      
+# # # 
 # class IDocBuildTest(setup_pipeline.CopySetupTestBase, StosRebuildHelper):
-#     '''Attemps an alignment on a cached copy of the output from IDocBuildTest'''
-#    
+#         
 #     @property
 #     def VolumePath(self):
 #         return "IDocBuildTest"
-#    
+#        
 #     @property
 #     def Platform(self):
 #         return "IDOC"
-#       
-#     
-#       
+#        
+#        
 #     @property
-#     def BruteLevel(self):
-#         return 32
-#       
+#     def Grid32ManualStosFullPath(self):
+#         return os.path.join(self.PlatformFullPath, "IDocBuildTest_Grid32Manual")
+#    
 #     def runTest(self):
-#      
-#    #============================================================================
-#    #      self.RunImport()
-#    #      self.RunPrune()
-#    # 
-#    #      self.RunSetPruneCutoff(Value="7.5", Section="693", Channels="*", Filters="Raw8")
-#    # 
-#    #      self.RunHistogram()
-#    # 
-#    #      self.RunSetContrast(MinValue="125", MaxValue="NaN", GammaValue="NaN", Section="693", Channels="*", Filters="Raw8")
-#    # 
-#    #      self.RunAdjustContrast()
-#    # 
-#    #      self.RemoveAndRegenerateTile(RegenFunction=self.RunAdjustContrast, RegenKwargs={'Sections' : 691}, section_number=691, channel='TEM', filter='Leveled', level=1)
-#    #      self.RemoveAndRegenerateTile(RegenFunction=self.RunAdjustContrast, RegenKwargs={'Sections' : 691}, section_number=691, channel='TEM', filter='Leveled', level=4)       
-#    #         
-#    #      self.RunSetFilterLocked('693', Channels="TEM", Filters="Leveled", Locked="1")
-#    #      self.RunSetFilterLocked('693', Channels="TEM", Filters="Leveled", Locked="0")
-#    # 
-#    #      self.RunMosaic(Filter="Leveled")
-#    #      self.RunMosaicReport()
-#    #      self.RunAssemble(Levels=[8,16])
-#    #         
-#    #      self.RunCreateVikingXML(StosGroup=None, StosMap=None, OutputFile="Mosaic")
-#    #      self.RunMosaicReport()
-#    #============================================================================
-#      
-#         # Copy output here to run IDocAlignTest
-# #    
-# #         BruteLevel = self.BruteLevel
-# #            
-# #    #     self.RunCreateBlobFilter(Channels="TEM", Filter="Leveled", Levels="8,16,%d" % (BruteLevel))
-# #         self.RunAlignSections(Channels="TEM", Filters="Blob", Levels=BruteLevel)
-# #            
+#         
+# #         self.RunImport()
+# #         self.RunPrune()
+# #      
+# #         self.RunSetPruneCutoff(Value="7.5", Section="693", Channels="*", Filters="Raw8")
+# #      
+# #         self.RunHistogram()
+# #      
+# #         self.RunSetContrast(MinValue="125", MaxValue="NaN", GammaValue="NaN", Section="693", Channels="*", Filters="Raw8")
+# #      
+# #         self.RunAdjustContrast()
+# #      
+# #         self.RemoveAndRegenerateTile(RegenFunction=self.RunAdjustContrast, RegenKwargs={'Sections' : 691}, section_number=691, channel='TEM', filter='Leveled', level=1)
+# #         self.RemoveAndRegenerateTile(RegenFunction=self.RunAdjustContrast, RegenKwargs={'Sections' : 691}, section_number=691, channel='TEM', filter='Leveled', level=2)  
+# #         self.RemoveAndRegenerateTile(RegenFunction=self.RunAdjustContrast, RegenKwargs={'Sections' : 691}, section_number=691, channel='TEM', filter='Leveled', level=4)       
+# #              
+# #         self.RunSetFilterLocked('693', Channels="TEM", Filters="Leveled", Locked="1")
+# #         self.RunSetFilterLocked('693', Channels="TEM", Filters="Leveled", Locked="0")
+# #      
+# #         self.RunMosaic(Filter="Leveled")
+# #         self.RunMosaicReport()
+# #         self.RunAssemble(Channels='TEM', Levels=[8,16])
+# #                
+# # #        self.RunCreateVikingXML(StosGroup=None, StosMap=None, OutputFile="Mosaic")
+# #         #self.RunMosaicReport()
+# #        
+# #         # Copy output here to run IDocAlignTest
+# # #      
+#         BruteLevel = 32
+# #        
+# #         self.RunCreateBlobFilter(Channels="TEM", Filter="Leveled", Levels=[8,16,BruteLevel])
+# #         self.RunAlignSections(Channels="TEM", Filters="Blob", Levels=BruteLevel, Center=693)
+# #                
 # #         self.RunAssembleStosOverlays(Group="StosBrute", Downsample=BruteLevel, StosMap='PotentialRegistrationChain')
 # #         self.RunSelectBestRegistrationChain(Group="StosBrute", Downsample=BruteLevel, InputStosMap='PotentialRegistrationChain', OutputStosMap='FinalStosMap')
-# #            
+# #               
 # #         self.RunRefineSectionAlignment(InputGroup="StosBrute", InputLevel=BruteLevel, OutputGroup="Grid", OutputLevel=BruteLevel, Filter="Leveled")
 # #         self.RunRefineSectionAlignment(InputGroup="Grid", InputLevel=BruteLevel, OutputGroup="Grid", OutputLevel=BruteLevel / 4, Filter="Leveled")
-# #    
-# #         # Copy output here to run IDocAlignOutputTest
-# #    
+# #         
+# #         #Copy output here to run IDocAlignOutputTest
+# #         
 # #         self.RunScaleVolumeTransforms(InputGroup="Grid", InputLevel=BruteLevel / 4, OutputLevel=1)
 # #         self.RunSliceToVolume()
 # #         self.RunMosaicToVolume()
 # #         self.RunCreateVikingXML(StosGroup='SliceToVolume1', StosMap='SliceToVolume', OutputFile="SliceToVolume")
-# #         self.RunAssembleMosaicToVolume(Channels="TEM")
-# #         self.RunMosaicReport(OutputFile='VolumeReport')
-# #         self.RunExportImages(Channels="Registered", Filters="Leveled", AssembleLevel=16) 
-# #         
-#         self.ForceStosRebuild(self.Grid32ManualStosFullPath)
-#         
-         
-#         
+#         self.RunAssembleMosaicToVolume(Channels="TEM")
+#         self.RunMosaicReport(OutputFile='VolumeReport')
+#         self.RunExportImages(Channels="Registered", Filters="Leveled", AssembleLevel=16)
+#          
+#         #Make sure we can export full-res mosaics.  This tests an old bug where level 1 image nodes were created with the same name
+#         self.RunAssemble(Channels='TEM', Levels=[1])
+#         self.RunExportImages(Channels="TEM", Filters="Leveled", AssembleLevel=1, Output="MosaicExport")
+#  
+# #  
+#         #TODO, this failed.  Fix it
+#         self.ForceStosRebuild(self.Grid32ManualStosFullPath, BruteLevel)  
+           
 #===============================================================================
 #  
 # class IDocAlignTest(setup_pipeline.CopySetupTestBase):
@@ -588,7 +648,7 @@ class LogReaderTest(IDocTest):
         self.assertEqual(TileData.startTime, 4924.937)
         self.assertEqual(TileData.endTime, 4948.016)
 
-         # From the log file we see that the tile wtih Z=22 should have two recorded drifts, 1.38, 0.9
+        # From the log file we see that the tile wtih Z=22 should have two recorded drifts, 1.38, 0.9
         TileData = LogData.tileData[23]
         self.assertIsNotNone(TileData)
         self.assertEqual(TileData.drift, 0.9)

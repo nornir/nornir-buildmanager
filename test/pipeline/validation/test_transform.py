@@ -63,8 +63,8 @@ class TransformIsValidTest(PrepareAndMosaicSetup):
         # self.assertFalse(self.ZeroGridTransform.Checksum == self.GridTransform.Checksum)
 
         # Make sure the checksum test is able to fail
-        self.assertTrue(transforms.IsOutdated(self.PruneTransform, self.TranslateTransform))
-        self.assertTrue(transforms.IsOutdated(self.TranslateTransform, self.GridTransform))
+        self.assertFalse(self.PruneTransform.IsInputTransformMatched(self.TranslateTransform))
+        self.assertFalse(self.PruneTransform.IsInputTransformMatched(self.GridTransform))
 
         # Take turns removing transform files and ensuring they are regenerated in isolation
         TransformNodes = list(self.ChannelData.findall('Transform'))
@@ -72,6 +72,8 @@ class TransformIsValidTest(PrepareAndMosaicSetup):
         for tNode in TransformNodes:
             if not 'InputTransform' in tNode.attrib:
                 continue
+            
+            prechecksum = tNode.Checksum
 
             os.remove(tNode.FullPath)
             self.Logger.info("Removing transform to see if it regenerates: " + tNode.FullPath)
@@ -84,21 +86,31 @@ class TransformIsValidTest(PrepareAndMosaicSetup):
 
             # Regenerate the missing transform, but ensure the later transform is untouched.
             # Import the files
-            buildArgs = ['-debug', 'Prune', '-volume', self.TestOutputPath, '-Threshold', '1.0']
-            build.Execute(buildArgs)
+            
+            #buildArgs = [self.TestOutputPath, '-debug', 'Prune', '-Threshold', '1.0']
+            #build.Execute(buildArgs)
+            self.RunPrune()
 
-            buildArgs = ['-debug', 'Mosaic', '-volume', self.TestOutputPath, '-InputFilter', 'Leveled']
-            build.Execute(buildArgs)
+            #buildArgs = [ self.TestOutputPath, '-debug', 'Mosaic', '-InputFilter', 'Leveled']
+            #build.Execute(buildArgs)
+            self.RunMosaic(Filter="Leveled")
 
             # Load the meta-data from the volumedata.xml file again
             self.LoadMetaData()
 
             # Make sure the transforms are still consistent
             self.ValidateAllTransforms(self.ChannelData)
+            
+            RefreshedTransform = tNode.Parent.GetChildByAttrib('Transform', 'Name', tNode.Name)
+            self.assertIsNotNone(RefreshedTransform)
 
             # Deleted transform should be regenerated.  The checksum should match what the one we deleted.  Downstream transforms should be left alone
             if not OutputTransform is None:
-                self.assertEqual(nornir_shared.files.NewestFile(tNode.FullPath, OutputTransform.FullPath), tNode.FullPath)
+                if prechecksum == RefreshedTransform.Checksum:
+                    self.assertEqual(nornir_shared.files.NewestFile(tNode.FullPath, OutputTransform.FullPath), tNode.FullPath)
+                else:
+                    #This is for translate results, so we'll special case this
+                    self.assertTrue('translate' in RefreshedTransform.Name, "Translate should be the only transform with a different checksum after regeneration")
 
             self.Logger.info("Transform regenerates successfully: " + tNode.FullPath)
 

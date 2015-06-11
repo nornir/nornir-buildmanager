@@ -10,8 +10,10 @@ import sys
 import tempfile
 import unittest
 import time
+import datetime
 
 import test.testbase
+
 
 from nornir_buildmanager.VolumeManagerETree import *
 from nornir_buildmanager.VolumeManagerHelpers import SearchCollection
@@ -20,6 +22,7 @@ from nornir_buildmanager.validation import transforms
 from nornir_imageregistration.files.mosaicfile import *
 from nornir_buildmanager.argparsexml import NumberList
 import nornir_shared.misc
+import nornir_imageregistration.files
  
 
 
@@ -70,19 +73,19 @@ def BuildPathToModifiedDateMap(path_list):
     '''Given a list of paths, construct a dictionary which maps to a cached last modified date'''
     file_to_modified_time= {}
     for file_path in path_list:
-        mtime = time.ctime(os.path.getmtime(file_path))
+        mtime = datetime.datetime.fromtimestamp(os.path.getmtime(file_path))
         file_to_modified_time[file_path] = mtime
         
     return  file_to_modified_time
 
 
-def MatchingFilters(SectionNodes, Channels, Filters):
+def EnumerateFilters(SectionNodes, Channels, Filters):
     '''Generator which returns a list of matching filters contained under a list of section nodes
     :param list SectionNodes: List of sections to search
     :param str Channels: Regular expression for channel names 
     :param str Filters: Regular expression for channel names
     :return: Generator of matching filters
-    :rtype: FilterNode'''
+    :rtype: FilterNode''' 
 
     for sectionNode in SectionNodes:
         ChannelNodes = SearchCollection(sectionNode.Channels, AttribName='Name', RegExStr=Channels)
@@ -92,7 +95,46 @@ def MatchingFilters(SectionNodes, Channels, Filters):
 
             for f in FilterNodes:
                 yield f
+             
+                
+def EnumerateImageSets(testObj, volumeNode, Channels, Filter, RequireMasks=True):
+    '''Used after assemble or blob create an imageset to ensure the correct levels exist'''
+    
+    sections = list(volumeNode.findall("Block/Section"))
+    filters = EnumerateFilters(sections, Channels, Filter)
+    
+    for f in filters:
+        if RequireMasks:
+            testObj.assertTrue(f.HasMask, "Mask expected for filters")
+            
+        image_sets = list(f.findall('ImageSet'))
+        testObj.assertIsNotNone(image_sets, "ImageSet node not found")
+        testObj.assertEqual(len(image_sets),1, "Multiple ImageSet nodes found")
+        yield image_sets[0]
 
+
+def ConvertLevelsToList(Levels):
+    if not isinstance(Levels, str):
+        if not isinstance(Levels, list):
+            Levels = [Levels]
+    else:
+        Levels = NumberList(Levels)
+        
+    return Levels
+
+
+def ConvertLevelsToString(Levels):
+    if not isinstance(Levels, str):
+        if isinstance(Levels, list):
+            LevelStr = ",".join(str(l) for l in Levels)
+        else:
+            LevelStr = str(Levels)
+            Levels = [Levels]
+    else:
+        LevelStr = Levels
+        Levels = NumberList(LevelStr)
+        
+    return LevelStr
 
 class VolumeEntry(object):
 
@@ -128,7 +170,19 @@ class PlatformTest(test.testbase.TestBase):
 
     @property
     def PlatformFullPath(self):
-        return os.path.join(self.TestDataPath, "PlatformRaw", self.Platform)
+        return os.path.join(self.TestInputPath, "PlatformRaw", self.Platform)
+    
+    
+    @property
+    def TestSetupCachePath(self):
+        '''The directory where we can cache the setup phase of the tests.  Delete to obtain a clean run of all tests'''
+        if 'TESTOUTPUTPATH' in os.environ:
+            TestOutputDir = os.environ["TESTOUTPUTPATH"]
+            return os.path.join(TestOutputDir, 'Cache', self.Platform, self.VolumePath)
+        else:
+            self.fail("TESTOUTPUTPATH environment variable should specify input data directory")
+
+        return None
      
     @property
     def ImportedDataPath(self):
@@ -140,6 +194,7 @@ class PlatformTest(test.testbase.TestBase):
 
     def RunBuild(self, buildArgs):
         '''Run a build, ensure the output directory exists, and return the volume obj'''
+        print("Run build : %s" % str(buildArgs))
         build.Execute(buildArgs)
         self.assertTrue(os.path.exists(self.TestOutputPath), "Test input was not copied")
         return self.LoadVolume()
@@ -154,23 +209,21 @@ class PlatformTest(test.testbase.TestBase):
 
     def _CreateBuildArgs(self, pipeline=None, *args):
 
-        pargs = ['-debug']
+        pargs = [self.TestOutputPath, '-debug']
 
         if isinstance(pipeline, str):
             # pargs.append('-pipeline')
             pargs.append(pipeline)
 
-        pargs.extend(['-volume', self.TestOutputPath])
+        #pargs.extend([self.TestOutputPath])
 
         pargs.extend(args)
 
         return pargs
 
-    def _CreateImportArgs(self, importpath, *args):
+    def _CreateImportArgs(self, importer, importpath, *args):
 
-        pargs = [ '-debug', 'import', importpath, ]
-
-        pargs.extend(['-volume', self.TestOutputPath])
+        pargs = [self.TestOutputPath, '-debug', importer, importpath]
 
         pargs.extend(args)
 
@@ -203,13 +256,14 @@ class PlatformTest(test.testbase.TestBase):
         InputTransform = transformNode.Parent.GetChildByAttrib('Transform', 'Name', transformNode.InputTransform)
         self.assertIsNotNone(InputTransform)
 
-        self.assertFalse(transforms.IsOutdated(transformNode, InputTransform))
+        
+        self.assertTrue(transformNode.IsInputTransformMatched(InputTransform))
 
         # Check that our reported checksum and actual file checksums match
         self.ValidateTransformChecksum(InputTransform)
 
         # Check that
-        self.assertFalse(transforms.IsOutdated(self.PruneTransform, self.StageTransform))
+        self.assertTrue(self.PruneTransform.IsInputTransformMatched(self.StageTransform))
 
     def EnsureTilePyramidIsFull(self, FilterNode, NumExpectedTiles):
 
@@ -242,9 +296,21 @@ class PlatformTest(test.testbase.TestBase):
     def RunImportThroughMosaicAssemble(self):
         self.RunImportThroughMosaic()
         self.RunAssemble()
-
+        
     def RunImport(self):
-        buildArgs = self._CreateImportArgs(self.ImportedDataPath)
+        if 'idoc' in self.Platform.lower():
+            return self.RunIDocImport()
+        elif 'pmg' in self.Platform.lower():
+            return self.RunPMGImport()
+            
+        raise NotImplementedError("Derived classes should point RunImport at a specific importer")
+
+    def RunIDocImport(self):
+        buildArgs = self._CreateImportArgs('ImportIDoc', self.ImportedDataPath)
+        self.RunBuild(buildArgs)
+        
+    def RunPMGImport(self):
+        buildArgs = self._CreateImportArgs('ImportPMG', self.ImportedDataPath)
         self.RunBuild(buildArgs)
 
     def RunPrune(self, Filter=None, Downsample=None):
@@ -262,7 +328,8 @@ class PlatformTest(test.testbase.TestBase):
 
         PruneNode = volumeNode.find("Block/Section/Channel/Transform[@Name='Prune']")
         self.assertIsNotNone(PruneNode, "No prune node produced")
-
+        
+        #Delete one prune data file, and make sure the associated .mosaic regenerates
         return volumeNode
 
 
@@ -275,7 +342,7 @@ class PlatformTest(test.testbase.TestBase):
         SectionNode = volumeNode.find("Block/Section[@Number='%s']" % str(Section))
         self.assertIsNotNone(volumeNode, "No section node found")
 
-        Filters = list(MatchingFilters([SectionNode], Channels, Filters))
+        Filters = list(EnumerateFilters([SectionNode], Channels, Filters))
 
         for fnode in Filters:
             pNode = fnode.find("Prune")
@@ -297,7 +364,7 @@ class PlatformTest(test.testbase.TestBase):
         SectionNode = volumeNode.find("Block/Section[@Number='%s']" % str(Section))
         self.assertIsNotNone(SectionNode, "No section node found")
 
-        Filters = list(MatchingFilters([SectionNode], Channels, Filters))
+        Filters = list(EnumerateFilters([SectionNode], Channels, Filters))
 
         for fnode in Filters:
             hNode = fnode.GetHistogram()
@@ -335,7 +402,7 @@ class PlatformTest(test.testbase.TestBase):
 
         self.assertEqual(len(Sections), len(sectionNumbers), "Did not find all of the expected sections")
 
-        Filters = list(MatchingFilters(Sections, Channels, Filters))
+        Filters = list(EnumerateFilters(Sections, Channels, Filters))
 
         for fnode in Filters:
             self.assertEqual(fnode.Locked, LockedVal, "Filter did not lock as expected")
@@ -361,12 +428,15 @@ class PlatformTest(test.testbase.TestBase):
         self.assertIsNotNone(ExpectedOutputFilter, "No filter node produced for contrast adjustment")
 
 
-    def RunHistogram(self, Filter=None, Downsample=4):
+    def RunHistogram(self, Filter=None, Downsample=4, Transform=None):
         if Filter is None:
             Filter = 'Raw8'
+        
+        if Transform is None:
+            Transform = "Prune"
 
         # Adjust Contrast
-        buildArgs = self._CreateBuildArgs('Histogram', '-Filters', Filter, '-Downsample', str(Downsample), '-InputTransform', 'Prune')
+        buildArgs = self._CreateBuildArgs('Histogram', '-Filters', Filter, '-Downsample', str(Downsample), '-InputTransform', Transform)
         volumeNode = self.RunBuild(buildArgs)
 
         HistogramNode = volumeNode.find("Block/Section/Channel/Filter[@Name='%s']/Histogram" % Filter)
@@ -374,15 +444,18 @@ class PlatformTest(test.testbase.TestBase):
 
         return volumeNode
 
-    def RunAdjustContrast(self, Sections=None, Filter=None, Gamma=None):
+    def RunAdjustContrast(self, Sections=None, Filter=None, Gamma=None, Transform=None):
         if Filter is None:
             Filter = 'Raw8'
+            
+        if Transform is None:
+            Transform = 'Prune'
 
         # Adjust Contrast
         if Sections is None:
-            buildArgs = self._CreateBuildArgs('AdjustContrast', '-InputFilter', Filter, '-OutputFilter', 'Leveled', '-InputTransform', 'Prune')
+            buildArgs = self._CreateBuildArgs('AdjustContrast', '-InputFilter', Filter, '-OutputFilter', 'Leveled', '-InputTransform', Transform)
         else:
-            buildArgs = self._CreateBuildArgs('AdjustContrast', '-Sections', str(Sections), '-InputFilter', Filter, '-OutputFilter', 'Leveled', '-InputTransform', 'Prune')
+            buildArgs = self._CreateBuildArgs('AdjustContrast', '-Sections', str(Sections), '-InputFilter', Filter, '-OutputFilter', 'Leveled', '-InputTransform', Transform)
 
         if not Gamma is None:
             buildArgs.extend(['-Gamma', str(Gamma)])
@@ -394,76 +467,24 @@ class PlatformTest(test.testbase.TestBase):
 
         return volumeNode
 
-    def RunMosaic(self, Filter):
+    def RunMosaic(self, Filter, Transform=None):
         if Filter is None:
             Filter = 'Leveled'
+        
+        if Transform is None:
+            Transform = 'Prune'
+            
         # Build Mosaics
-        buildArgs = self._CreateBuildArgs('Mosaic', '-InputTransform', 'Prune', '-InputFilter', Filter, '-OutputTransform', 'Grid')
+        buildArgs = self._CreateBuildArgs('Mosaic', '-InputTransform', Transform, '-InputFilter', Filter, '-OutputTransform', 'Grid', '-Iterations', "3", '-Threshold', "1.0")
         volumeNode = self.RunBuild(buildArgs)
 
         TransformNode = volumeNode.find("Block/Section/Channel/Transform[@Name='Grid']")
         self.assertIsNotNone(TransformNode, "No final transform node produced by Mosaic pipeline")
 
         return volumeNode
+        
     
-    def _VerifyImageSetMatchesTransform(self, image_set_node, transform_name):
-        self.assertEqual(ImageSetNode.InputTransform, transform_name, "InputTransform for ImageSet does not match transform used for assemble")
-        self._CheckInputTransformChecksumCorrect(ImageSetNode, InputTransformName=transform_name)
-        # Check that the InputTransform name and type match the requested transform
-
-        AssembledImageNode = ImageSetNode.find("Level[@Downsample='%d']/Image" % (Level))
-        self.assertIsNotNone(AssembledImageNode, "No Image node produced from assemble pipeline")
-        
-        self._CheckInputTransformChecksumCorrect(AssembledImageNode, InputTransformName=Transform)
-
-    def RunAssemble(self, Filter=None, Transform=None, Levels=8):
-        if Filter is None:
-            Filter = "Leveled"
-            
-        if Transform is None:
-            Transform = 'Grid'
-        
-        if not isinstance(Levels, str):
-            if isinstance(Levels, list):
-                LevelStr = ",".join(str(l) for l in Levels)
-            else:
-                LevelStr = str(Levels)
-                Levels = [Levels]
-        else:
-            LevelStr = Levels
-            Levels = NumberList(LevelStr)
-
-        # Build Mosaics
-        buildArgs = self._CreateBuildArgs('Assemble', '-Transform', Transform, '-Filters', Filter, '-Downsample', LevelStr, '-NoInterlace')
-        volumeNode = self.RunBuild(buildArgs)
-
-        # ChannelNode = volumeNode.find("Block/Section/Channel")
-        
-        ImageSetNodes = list(volumeNode.findall("Block/Section/Channel/Filter[@Name='%s']/ImageSet" % (Filter)))
-        self.assertIsNotNone(ImageSetNodes, "ImageSet nodes not found")
-        self.assertGreater(len(ImageSetNodes), 0, "ImageSet nodes should be created by assemble unless this is a negative test of some sort")
-        
-        for ImageSetNode in ImageSetNodes: 
-            self._CheckImageSetIsCorrect(ImageSetNode, Transform, Levels)
-
-        return volumeNode
-    
-    
-    def _CheckImageSetIsCorrect(self, image_set_node, transform, Levels):
-        ''':param list Levels: Integer list of downsample levels expected'''
-        
-        self._CheckInputTransformIsCorrect(image_set_node, InputTransformName=transform)
-        # Check that the InputTransform name and type match the requested transform
-
-        for level in Levels:
-            AssembledImageNode = image_set_node.find("Level[@Downsample='%d']/Image" % (level))
-            self.assertIsNotNone(AssembledImageNode, "No Image node at level %d produced from assemble pipeline" % (level))
-        
-            self.assertTrue(os.path.exists(AssembledImageNode.FullPath), "Output file expected for image node after assemble runs, level %d" % (level))
-        
-        # self._CheckInputTransformIsCorrect(AssembledImageNode, InputTransformName=Transform)
-    
-    def _CheckInputTransformIsCorrect(self, InputTransformChecksumNode, InputTransformName):
+    def _VerifyInputTransformIsCorrect(self, InputTransformChecksumNode, InputTransformName):
         '''Check that the checksum for a transform matches the recorded input transform checksum for a node under a channel'''
         
         ChannelNode = InputTransformChecksumNode.FindParent('Channel')
@@ -478,7 +499,46 @@ class PlatformTest(test.testbase.TestBase):
         self.assertEqual(InputTransformChecksumNode.InputTransformCropBox, TransformNode.CropBox, "CropBox does not match the transform")
         
         self.assertTrue(InputTransformChecksumNode.IsInputTransformMatched(TransformNode), "IsInputTransformMatched should return true when the earlier tests in this function have passed")
+    
+    
+    def _VerifyImageSetMatchesTransform(self, image_set_node, transform_name):
         
+        self.assertEqual(image_set_node.InputTransform, transform_name, "InputTransform for ImageSet does not match transform used for assemble")
+        self._VerifyInputTransformIsCorrect(image_set_node, InputTransformName=transform_name)
+     
+    
+    def _VerifyImageSetHasExpectedLevels(self, image_set_node, expected_levels, ):
+        for level in expected_levels:
+            AssembledImageNode = image_set_node.find("Level[@Downsample='%d']/Image" % (level))
+            self.assertIsNotNone(AssembledImageNode, "No Image node at level %d produced from assemble pipeline" % (level))
+            self.assertTrue(os.path.exists(AssembledImageNode.FullPath), "Output file expected for image node after assemble runs, level %d" % (level))
+        
+        # self._VerifyInputTransformIsCorrect(AssembledImageNode, InputTransformName=Transform)
+             
+    def RunAssemble(self, Channels=None, Filter=None, TransformName=None, Levels=8):
+        if Filter is None:
+            Filter = "Leveled"
+            
+        if TransformName is None:
+            TransformName = 'Grid'
+        
+        Levels = ConvertLevelsToList(Levels)
+        LevelsStr = ConvertLevelsToString(Levels) 
+        # Build Mosaics
+        buildArgs = []
+        if not Channels is None:
+            buildArgs = self._CreateBuildArgs('Assemble', '-Channels', Channels, '-Transform', TransformName, '-Filters', Filter, '-Downsample', LevelsStr, '-NoInterlace')
+        else:
+            buildArgs = self._CreateBuildArgs('Assemble', '-Transform', TransformName, '-Filters', Filter, '-Downsample', LevelsStr, '-NoInterlace')
+            
+        volumeNode = self.RunBuild(buildArgs)
+ 
+        for image_set_node in EnumerateImageSets(self, volumeNode, Channels, Filter, RequireMasks=True) : 
+            self._VerifyImageSetHasExpectedLevels(image_set_node, Levels)
+            self._VerifyImageSetMatchesTransform(image_set_node, TransformName)
+
+        return volumeNode
+    
 
     def RunMosaicReport(self, ContrastFilter=None, AssembleFilter=None, AssembleDownsample=8, OutputFile=None):
         if ContrastFilter is None:
@@ -512,22 +572,32 @@ class PlatformTest(test.testbase.TestBase):
 
         if Filter is None:
             Filter = 'Leveled'
+            
+        Levels = ConvertLevelsToList(Levels)
+        LevelsStr = ConvertLevelsToString(Levels) 
 
         # Build Mosaics
-        buildArgs = self._CreateBuildArgs('CreateBlobFilter', '-Channels', Channels, '-InputFilter', Filter, '-Levels', Levels, '-OutputFilter', 'Blob')
+        buildArgs = self._CreateBuildArgs('CreateBlobFilter', '-Channels', Channels, '-InputFilter', Filter, '-Levels', LevelsStr, '-OutputFilter', 'Blob')
         volumeNode = self.RunBuild(buildArgs)
 
-        ChannelNode = volumeNode.find("Block/Section/Channel")
-
-        AssembledImageNode = ChannelNode.find("Filter[@Name='Blob']/ImageSet/Level[@Downsample='%d']/Image" % 8)
-        self.assertIsNotNone(AssembledImageNode, "No blob Image node produced from CreateBlobFilter pipeline")
-
-        self.assertTrue(os.path.exists(AssembledImageNode.FullPath), "No file found for assembled image node")
-
+        for image_set_node in EnumerateImageSets(self, volumeNode, Channels, Filter='Blob', RequireMasks=True) : 
+            self._VerifyImageSetHasExpectedLevels(image_set_node, Levels)
+            #self._VerifyImageSetMatchesTransform(image_set_node, TransformName)
+            
         return volumeNode
     
     
-    def VerifyStosTransformPipelineSharedTests(self, volumeNode, stos_map_name, stos_group_name, buildArgs):
+    def _StosFileHasMasks(self,stosfileFullPath):
+        stosfileObj = nornir_imageregistration.files.StosFile.Load(stosfileFullPath)
+        return stosfileObj.HasMasks
+    
+    
+    def _StosGroupHasMasks(self, stos_group_node):
+        transformNodes = list(stos_group_node.findall("SectionMappings/Transform"))
+        return self._StosFileHasMasks(transformNodes[0].FullPath)
+    
+    
+    def VerifyStosTransformPipelineSharedTests(self, volumeNode, stos_map_name, stos_group_name, MasksRequired, buildArgs):
         '''Ensure every section has a transform and that the transform is not regenerated if the pipeline is run twice.'''
         stos_map_node = volumeNode.find("Block/StosMap[@Name='%s']" % (stos_map_name))
         self.assertIsNotNone(stos_map_node)
@@ -543,20 +613,26 @@ class PlatformTest(test.testbase.TestBase):
         full_paths = FullPathsForNodes(stos_group_node.findall("SectionMappings/Transform"))
         transform_last_modified = BuildPathToModifiedDateMap(full_paths)
         
+        #Make sure our output stos file has masks if they were called for
+        self.assertEqual(self._StosFileHasMasks(full_paths[0]), MasksRequired, "%s does not match mask expectation, masks expected = %s" % (full_paths[0], '-UseMasks' in buildArgs))
+          
         volumeNode = self.RunBuild(buildArgs)
         self.VerifyFilesLastModifiedDateUnchanged(transform_last_modified)
         
 
-    def RunAlignSections(self, Channels, Filters, Levels, Center=None):
+    def RunAlignSections(self, Channels, Filters, Levels, Center=None, UseMasks=True):
         # Build Mosaics
-        buildArgs = self._CreateBuildArgs('AlignSections', '-NumAdjacentSections', '1', '-Filters', Filters, '-StosUseMasks', 'True', '-Downsample', str(Levels), '-Channels', Channels)
+        buildArgs = self._CreateBuildArgs('AlignSections', '-NumAdjacentSections', '1', '-Filters', Filters, '-Downsample', str(Levels), '-Channels', Channels)
         if not Center is None:
-            buildArgs = self._CreateBuildArgs('AlignSections', '-NumAdjacentSections', '1', '-Filters', Filters, '-StosUseMasks', 'True', '-Downsample', str(Levels), '-Channels', Channels, '-Center', str(Center))             
+            buildArgs = self._CreateBuildArgs('AlignSections', '-NumAdjacentSections', '1', '-Filters', Filters, '-Downsample', str(Levels), '-Channels', Channels, '-Center', str(Center))
+            
+        if UseMasks:
+            buildArgs.append('-UseMasks')             
         
         volumeNode = self.RunBuild(buildArgs)
         self.assertIsNotNone(volumeNode)
 
-        self.VerifyStosTransformPipelineSharedTests(volumeNode, stos_map_name='PotentialRegistrationChain', stos_group_name='%s%d' % ('StosBrute', Levels), buildArgs=buildArgs)
+        self.VerifyStosTransformPipelineSharedTests(volumeNode, stos_map_name='PotentialRegistrationChain', stos_group_name='%s%d' % ('StosBrute', Levels), MasksRequired='-UseMasks' in buildArgs, buildArgs=buildArgs)
     
         return volumeNode
     
@@ -579,7 +655,7 @@ class PlatformTest(test.testbase.TestBase):
         '''Takes a dictionary of {file_path:  last_modified}.  Fails if a files modified time on disk does not match the value in the dictionary'''
         
         for (file_path, last_modified_reference) in file_last_modified_map.items():
-            disk_modified_time = time.ctime(os.path.getmtime(file_path))
+            disk_modified_time = datetime.datetime.fromtimestamp(os.path.getmtime(file_path))
             self.assertEqual(last_modified_reference, disk_modified_time, "Last modified date for %s should not be different" % (file_path))
             
     
@@ -587,7 +663,7 @@ class PlatformTest(test.testbase.TestBase):
         '''Takes a dictionary of {file_path:  last_modified}.  Fails if a files modified time on disk does not match the value in the dictionary'''
         
         for (file_path, last_modified_reference) in file_last_modified_map.items():
-            disk_modified_time = time.ctime(os.path.getmtime(file_path))
+            disk_modified_time = datetime.datetime.fromtimestamp(os.path.getmtime(file_path))
             self.assertGreater(disk_modified_time, last_modified_reference, "Last modified date for %s is %s, should be later than %s" % (file_path, str(disk_modified_time), str(last_modified_reference)))
             
     
@@ -636,20 +712,24 @@ class PlatformTest(test.testbase.TestBase):
         return volumeNode
     
 
-    def RunRefineSectionAlignment(self, InputGroup, InputLevel, OutputGroup, OutputLevel, Filter):
+    def RunRefineSectionAlignment(self, InputGroup, InputLevel, OutputGroup, OutputLevel, Filter, UseMasks=True):
         # Build Mosaics
         buildArgs = self._CreateBuildArgs('RefineSectionAlignment', '-InputGroup', InputGroup,
                                           '-InputDownsample', str(InputLevel),
                                           '-OutputGroup', OutputGroup,
                                           '-OutputDownsample', str(OutputLevel),
-                                          '-Filter', 'Leveled',
-                                          '-StosUseMasks', 'True')
+                                          '-Filter', 'Leveled', 
+                                          '-Iterations', "3",
+                                          '-Threshold', "1.0")
+        if UseMasks:
+            buildArgs.append('-UseMasks')   
+            
         volumeNode = self.RunBuild(buildArgs)
 
         stos_group_node = volumeNode.find("Block/StosGroup[@Name='%s%d']" % (OutputGroup, OutputLevel))
         self.assertIsNotNone(stos_group_node, "No %s%d Stos Group node produced" % (OutputGroup, OutputLevel))
           
-        self.VerifyStosTransformPipelineSharedTests(volumeNode=volumeNode, stos_group_name='%s%d' % (OutputGroup, OutputLevel), stos_map_name='FinalStosMap', buildArgs=buildArgs)
+        self.VerifyStosTransformPipelineSharedTests(volumeNode=volumeNode, stos_group_name='%s%d' % (OutputGroup, OutputLevel), stos_map_name='FinalStosMap',  MasksRequired='-UseMasks' in buildArgs, buildArgs=buildArgs)
          
         return volumeNode
 
@@ -661,7 +741,9 @@ class PlatformTest(test.testbase.TestBase):
         StosGroupNode = volumeNode.find("Block/StosGroup[@Name='%s%d']" % (InputGroup, OutputLevel))
         self.assertIsNotNone(StosGroupNode, "No %s%d Stos Group node produced" % (InputGroup, OutputLevel))
         
-        self.VerifyStosTransformPipelineSharedTests(volumeNode=volumeNode, stos_group_name='%s%d' % (InputGroup, OutputLevel), stos_map_name='FinalStosMap', buildArgs=buildArgs)
+        MasksRequired = self._StosGroupHasMasks(StosGroupNode)
+        
+        self.VerifyStosTransformPipelineSharedTests(volumeNode=volumeNode, stos_group_name='%s%d' % (InputGroup, OutputLevel), stos_map_name='FinalStosMap', MasksRequired=MasksRequired, buildArgs=buildArgs)
         return volumeNode
 
     def RunSliceToVolume(self, Level=1):
@@ -673,7 +755,9 @@ class PlatformTest(test.testbase.TestBase):
         StosGroupNode = volumeNode.find("Block/StosGroup[@Name='%s%d']" % (group_name,Level))
         self.assertIsNotNone(StosGroupNode, "No SliceToVolume%d stos group node created" % Level)
         
-        self.VerifyStosTransformPipelineSharedTests(volumeNode=volumeNode, stos_group_name='%s%d' % (group_name, Level), stos_map_name='FinalStosMap', buildArgs=buildArgs)
+        MasksRequired = self._StosGroupHasMasks(StosGroupNode)
+        
+        self.VerifyStosTransformPipelineSharedTests(volumeNode=volumeNode, stos_group_name='%s%d' % (group_name, Level), stos_map_name='FinalStosMap', MasksRequired=MasksRequired, buildArgs=buildArgs)
         return volumeNode
 
     def RunMosaicToVolume(self):
@@ -726,9 +810,15 @@ class PlatformTest(test.testbase.TestBase):
                                                           '-Downsample', str(AssembleLevel),
                                                           '-Output', imageOutputPath)
         volumeNode = self.RunBuild(buildArgs)
-
+        
+        filters = EnumerateFilters(volumeNode.findall("Block/Section"), Channels, Filters)
+        NumImages = 0
+        for f in filters:
+            if f.Imageset.HasImage(AssembleLevel):
+                NumImages += 1
+                
         OutputPngs = glob.glob(os.path.join(imageOutputPath, '*.png'))
-        self.assertTrue(len(OutputPngs) > 0, "No exported images found in %s" % imageOutputPath)
+        self.assertEqual(len(OutputPngs), NumImages, "Missing exported images %s" % imageOutputPath)
 
         return volumeNode
 
@@ -828,31 +918,19 @@ class CopySetupTestBase(PlatformTest):
 
         shutil.copytree(self.ImportedDataPath, self.TestOutputPath)
 
-
-# nornir-build -volume %1 -pipeline CreateBlobFilter -Channels AssembledTEM -InputFilter Leveled -Levels 16,32 -OutputFilter Blob
-# nornir-build -volume %1 -pipeline AlignSections -NumAdjacentSections 1 -Filters Blob -StosUseMasks True -Downsample 32 -Channels AssembledTEM
-# nornir-build -volume %1 -pipeline RefineSectionAlignment -InputGroup StosBrute -InputDownsample 32 -OutputGroup Grid -OutputDownsample 32 -Filter Leveled -StosUseMasks True
-# nornir-build -volume %1 -pipeline RefineSectionAlignment -InputGroup Grid -InputDownsample 32 -OutputGroup Grid -OutputDownsample 16 -Filter Leveled -StosUseMasks True
-# nornir-build -volume %1 -pipeline ScaleVolumeTransforms -InputGroup Grid -InputDownsample 16 -OutputDownsample 1
-# nornir-build -volume %1 -pipeline SliceToVolume -InputDownsample 1 -InputGroup Grid -OutputGroup SliceToVolume
-#
-# nornir-build -volume %1 -pipeline MosaicToVolume -InputTransform Grid -OutputTransform ChannelToVolume -Channels TEM
-#
-# nornir-build -volume %1 -pipeline Assemble -Channels TEM -Filters Leveled -AssembleDownsample 8,16,32 -NoInterlace -Transform ChannelToVolume
-
-
 class ImportOnlySetup(PlatformTest):
     '''Calls prepare on a PMG volume.  Used as a base class for more complex tests'''
 
     def setUp(self):
         super(ImportOnlySetup, self).setUp()
 
+        CacheName = 'ImportOnlySetup'
         # Import the files
-        buildArgs = ['-debug', 'import', self.ImportedDataPath, '-volume', self.TestOutputPath]
-        build.Execute(buildArgs)
-
-        self.assertTrue(os.path.exists(self.TestOutputPath), "Test input was not copied")
-
+        if not self.TryLoadTestSetupFromCache(CacheName):
+            self.RunImport()
+            self.assertTrue(os.path.exists(self.TestOutputPath), "Test input was not copied")
+            self.SaveTestSetupToCache(CacheName)
+            
         # Load the meta-data from the volumedata.xml file
         self.VolumeObj = VolumeManager.Load(self.TestOutputPath)
         self.assertIsNotNone(self.VolumeObj)
@@ -861,10 +939,13 @@ class PrepareSetup(PlatformTest):
     '''Calls prepare on a PMG volume.  Used as a base class for more complex tests'''
     def setUp(self):
         super(PrepareSetup, self).setUp()
-
-        self.RunImport()
-        self.RunPrune()
-        self.RunHistogram()
+        CacheName = 'PrepareSetup'
+        
+        if not self.TryLoadTestSetupFromCache(CacheName):
+            self.RunImport()
+            self.RunPrune()
+            self.RunHistogram()        
+            self.SaveTestSetupToCache(CacheName)
 
         # Load the meta-data from the volumedata.xml file
         self.VolumeObj = VolumeManager.Load(self.TestOutputPath)
@@ -878,8 +959,11 @@ class PrepareAndMosaicSetup(PlatformTest):
 
         super(PrepareAndMosaicSetup, self).setUp()
         # Import the files
+        CacheName = 'PrepareAndMosaicSetup'
 
-        self.RunImportThroughMosaic()
+        if not self.TryLoadTestSetupFromCache(CacheName):
+            self.RunImportThroughMosaic()
+            self.SaveTestSetupToCache(CacheName)
 
         # Load the meta-data from the volumedata.xml file
         self.VolumeObj = VolumeManager.Load(self.TestOutputPath)
@@ -890,10 +974,12 @@ class PrepareThroughAssembleSetup(PlatformTest):
 
     def setUp(self):
 
-        super(PrepareAndMosaicSetup, self).setUp()
+        super(PrepareThroughAssembleSetup, self).setUp()
+        CacheName = 'PrepareThroughAssembleSetup'
         # Import the files
-
-        self.RunImportThroughMosaicAssemble()
+        if not self.TryLoadTestSetupFromCache(CacheName):
+            self.RunImportThroughMosaicAssemble()
+            self.SaveTestSetupToCache(CacheName)
 
         # Load the meta-data from the volumedata.xml file
         self.VolumeObj = VolumeManager.Load(self.TestOutputPath)

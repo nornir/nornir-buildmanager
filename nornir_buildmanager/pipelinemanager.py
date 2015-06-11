@@ -18,6 +18,7 @@ import nornir_shared.misc
 import nornir_shared.prettyoutput as prettyoutput
 import nornir_shared.reflection
 import argparsexml
+import nornir_pools
 
 
 class ArgumentSet():
@@ -591,8 +592,12 @@ class PipelineManager(object):
 
         # parser.prog = PipelineNode.attrib['Name'];
 
+        if 'Help' in PipelineNode.attrib:
+            parser.help = PipelineNode.attrib['Help']
+            
         if 'Description' in PipelineNode.attrib:
             parser.description = PipelineNode.attrib['Description']
+            
 
         if 'Epilog' in PipelineNode.attrib:
             parser.epilog = PipelineNode.attrib['Epilog']
@@ -646,6 +651,8 @@ class PipelineManager(object):
         # dargs = copy.deepcopy(defaultDargs)
 
         self.ExecuteChildPipelines(ArgSet, self.VolumeTree, PipelineElement)
+        
+        nornir_pools.ClosePools()
 
     def ExecuteChildPipelines(self, ArgSet, VolumeElem, PipelineNode):
         '''Run all of the child pipeline elements on the volume element'''
@@ -801,8 +808,15 @@ class PipelineManager(object):
             if(SelectedVolumeElem is None):
                 raise PipelineSelectFailed(PipelineNode=PipelineNode, VolumeElem=RootForSearch, xpath=xpath)
 
-            if SelectedVolumeElem.CleanIfInvalid():
-                SelectedVolumeElem = None
+            if not SelectedVolumeElem.IsValid():
+                #Check if the node is locked, otherwise clean it and look for another node
+                if 'Locked' in SelectedVolumeElem.attrib:
+                    if SelectedVolumeElem.Locked:
+                        break
+                    else:
+                        SelectedVolumeElem.Clean()
+                        PipelineManager._SaveNodes(SelectedVolumeElem.Parent)
+                        SelectedVolumeElem = None
 
         if not SelectedVolumeElem is None:
             self.AddPipelineNodeVariable(PipelineNode, SelectedVolumeElem, ArgSet)
@@ -821,8 +835,8 @@ class PipelineManager(object):
 
         NumProcessed = 0
         for VolumeElemChild in VolumeElemIter:
-
             if VolumeElemChild.CleanIfInvalid():
+                PipelineManager._SaveNodes(VolumeElemChild.Parent)
                 continue
 
             NumProcessed += self.ExecuteChildPipelines(CopiedArgSet, VolumeElemChild, PipelineNode)
@@ -831,13 +845,16 @@ class PipelineManager(object):
             raise PipelineSearchFailed(PipelineNode=PipelineNode, VolumeElem=RootForSearch, xpath=xpath)
 
     @classmethod
-    def _SaveNodes(cls, NodesToSave, VolumePath):
+    def _SaveNodes(cls, NodesToSave):
         if not NodesToSave is None:
             if isinstance(NodesToSave, collections.Iterable):
                 for node in NodesToSave:
-                    VolumeManagerETree.VolumeManager.Save(VolumePath, node)
+                    if node is None:
+                        continue 
+                    
+                    VolumeManagerETree.VolumeManager.Save(node)
             else:
-                VolumeManagerETree.VolumeManager.Save(VolumePath, NodesToSave)
+                VolumeManagerETree.VolumeManager.Save(NodesToSave)
 
     def ProcessPythonCall(self, ArgSet, VolumeElem, PipelineNode):
         # Try to find a stage for the element we encounter in the pipeline.
@@ -908,14 +925,16 @@ class PipelineManager(object):
                     # if they return false we do not need to run the expensive save operation
                     NodesToSave = stageFunc(**kwargs)
 
-                PipelineManager._SaveNodes(NodesToSave, VolumePath=ArgSet.Arguments["volumepath"])
+                PipelineManager._SaveNodes(NodesToSave)
 
             finally:
                 ArgSet.ClearAttributes()
                 ArgSet.ClearParameters()
+                
+            prettyoutput.CurseString('Stage', PipelineModule + "." + PipelineFunction + " completed")
 
- #           PipelineManager.RemoveParameters(dargs, PipelineNode)
- #           PipelineManager.RemoveAttributes(dargs, PipelineNode)
+#           PipelineManager.RemoveParameters(dargs, PipelineNode)
+#           PipelineManager.RemoveAttributes(dargs, PipelineNode)
 
     def AddPipelineNodeVariable(self, PipelineNode, VolumeElem, ArgSet):
         '''Adds a variable to our dictionary passed to functions'''

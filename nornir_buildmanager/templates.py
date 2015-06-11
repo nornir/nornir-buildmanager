@@ -2,22 +2,6 @@ import multiprocessing
 import os
 
 
-def GetFlipList(path):
-    FlippedSections = list();
-
-    flipFileName = os.path.join(path, 'FlipList.txt');
-    if os.path.exists(flipFileName) == False:
-        return FlippedSections;
-
-    flipFile = open(flipFileName, 'r');
-    lines = flipFile.readlines();
-    flipFile.close();
-
-    for line in lines:
-        sectionNumber = int(line);
-        FlippedSections.append(sectionNumber);
-
-    return FlippedSections;
 
 class __Config:
     '''A place to store hardcoded values used throughout the buildscripts'''
@@ -51,7 +35,7 @@ class __Config:
             self.__NumProcs = multiprocessing.cpu_count();
             try:
 
-                from Utils import prettyoutput;
+                from nornir_shared import prettyoutput;
                 prettyoutput.CurseString("# of Cores", str(self.__NumProcs));
             except:
                 pass;

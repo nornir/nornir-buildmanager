@@ -7,11 +7,18 @@ Created on Feb 25, 2014
 import logging
 import math
 
-
 def SetFilterLock(Node, Locked):
     ParentFilter = Node.FindParent('Filter')
     if not ParentFilter is None:
-        ParentFilter.Locked = Locked
+        ParentFilter.Locked = bool(Locked)
+        
+def SetLocked(Node, Locked, **kwargs):
+    Node.Locked = bool(Locked)
+    parent = Node.Parent
+    if not parent is None:
+        return parent
+    
+    return None
 
 
 def SetPruneThreshold(PruneNode, Value, **kwargs):
@@ -67,7 +74,29 @@ def SetFilterContrastLocked(FilterNode, Locked, **kwargs):
 
     logger.info("Setting filter to locked = " + str(Locked) + "  " + FilterNode.FullPath)
 
-    return FilterNode
+    return FilterNode.Parent
+
+def SetFilterMaskName(FilterNode, MaskName, **kwargs):
+    
+    logger = logging.getLogger(__name__ + '.SetFilterContrastLocked')
+
+    FilterNode.MaskName = MaskName
+
+    logger.info("Setting filter MaskName to " + MaskName + "  " + FilterNode.FullPath)
+
+    return FilterNode.Parent
+
+def PrintSectionsDamaged(block_node, **kwargs):
+    print(','.join(list(map(str,block_node.NonStosSectionNumbers))))
+    return None
+
+def MarkSectionsAsDamaged(block_node, SectionNumbers, **kwargs):
+    block_node.MarkSectionsAsDamaged(SectionNumbers)
+    return block_node.Parent
+    
+def MarkSectionsAsUndamaged(block_node, SectionNumbers, **kwargs):
+    block_node.MarkSectionsAsUndamaged(SectionNumbers)
+    return block_node.Parent
 
 if __name__ == '__main__':
     pass

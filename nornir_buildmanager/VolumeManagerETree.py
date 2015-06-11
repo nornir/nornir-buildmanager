@@ -10,24 +10,22 @@ import shutil
 import sys
 import urllib
 import math
-
-import VolumeManagerHelpers as VMH
-
-import nornir_buildmanager.Config as Config
-import nornir_buildmanager.operations.versions as versions
-import nornir_buildmanager.operations.tile as tile
-import nornir_imageregistration.transforms.registrationtree
-from nornir_imageregistration.files import *
+ 
 import nornir_shared.checksum
 import nornir_shared.misc as misc
 import nornir_shared.prettyoutput as prettyoutput
 import nornir_shared.reflection as reflection
-import xml.etree.ElementTree as ElementTree
+import nornir_shared.files
 
+import nornir_buildmanager
+import nornir_buildmanager.operations.versions as versions
+import nornir_buildmanager.operations.tile as tile
+import nornir_imageregistration.transforms.registrationtree
+from nornir_imageregistration.files import *
+import xml.etree.ElementTree as ElementTree 
+import VolumeManagerHelpers as VMH
+import nornir_buildmanager.validation.transforms
  
-
-    
-# import
 # Used for debugging with conditional break's, each node gets a temporary unique ID
 nid = 0
 
@@ -66,7 +64,7 @@ class VolumeManager():
     def __init__(self, volumeData, filename):
         self.Data = volumeData
         self.XMLFilename = filename
-        pass
+        return
 
     @classmethod
     def Create(cls, VolumePath):
@@ -153,8 +151,7 @@ class VolumeManager():
             VolumeManager.__SetElementParent__(e, Element)
 
         return
-
-        return False
+    
 
     @classmethod
     def __SortNodes__(cls, Element):
@@ -186,50 +183,18 @@ class VolumeManager():
         XMLString = ElementTree.tostring(VolumeObj, encoding="utf-8")
         OldChecksum = VolumeObj.get('Checksum', '')
         XMLString = XMLString.replace(OldChecksum, "", 1)
-        return nornir_shared.Checksum.DataChecksum(XMLString)
+        return nornir_shared.checksum.DataChecksum(XMLString)
 
 
     @classmethod
-    def Save(cls, VolumePath, VolumeObj):
+    def Save(cls, VolumeObj):
         '''Save the volume to an XML file'''
 
-        '''We cannot include the volume checksum in the calculation because including it changes the checksum'''
-#        NewChecksum = cls.CalcVolumeChecksum(VolumeObj)
-#        OldChecksum = VolumeObj.get('Checksum', '')
-#
-#        if OldChecksum == NewChecksum:
-#            '''When the checksums match there is nothing new to save'''
-#            return
-
-        # cls.__RemoveElementsWithoutPath__(VolumeObj)
-        # cls.__SortNodes__(VolumeObj)
-        # cls.__RemoveEmptyElements__(VolumeObj)
-
+        #We cannot include the volume checksum in the calculation because including it changes the checksum'''
         if hasattr(VolumeObj, 'Save'):
             VolumeObj.Save(tabLevel=None)
         else:
-            cls.Save(VolumePath, VolumeObj.Parent)
-
-#        #Make sure any changes are accounted for by calculating a new checksum
-#        NewChecksum = cls.CalcVolumeChecksum(VolumeObj)
-#        VolumeObj.attrib['Checksum'] = NewChecksum
-#
-#        TempXMLFilename = os.path.join(VolumePath, 'TempVolume.XML')
-#
-#        OutputXML = ElementTree.tostring(VolumeObj, encoding="utf-8")
-#
-#        hFile = open(TempXMLFilename, 'w')
-#        hFile.write(OutputXML)
-#        hFile.close()
-#
-#        XMLFilename = os.path.join(VolumePath, 'Volume.XML')
-#
-#        shutil.copy(TempXMLFilename, XMLFilename)
-#        os.remove(TempXMLFilename)
-#
-#        #Update the cache we use to load volumes
-#        __LoadedVolumeXMLDict__[XMLFilename] = ElementTree.ElementTree(VolumeObj)
-
+            cls.Save(VolumeObj.Parent)
 
 class XPropertiesElementWrapper(ElementTree.Element):
     @property
@@ -255,8 +220,9 @@ class XPropertiesElementWrapper(ElementTree.Element):
         if '__fullpath' in self.__dict__:
             del self.__dict__['__fullpath']
 
-    '''Wrapper for a properties element'''
+    
     def __init__(self, tag, attrib=None, **extra):
+        '''Wrapper for a properties element'''
         super(XPropertiesElementWrapper, self).__init__(tag=tag, attrib=attrib, **extra)
 
     @classmethod
@@ -308,15 +274,15 @@ class XPropertiesElementWrapper(ElementTree.Element):
         elif(name[0] == '_'):
             self.__dict__[name] = value
         else:
-                valstr = pickle.dumps(value, 0)
-                valstr = urllib.quote_plus(valstr)
+            valstr = pickle.dumps(value, 0)
+            valstr = urllib.quote_plus(valstr)
 
-                entry = self.__getEntry__(name)
-                if entry is None:
-                    entry = ElementTree.Element("Entry", {'Name':name, 'Value':valstr})
-                    self.append(entry)
-                else:
-                    entry.attrib['Value'] = valstr
+            entry = self.__getEntry__(name)
+            if entry is None:
+                entry = ElementTree.Element("Entry", {'Name':name, 'Value':valstr})
+                self.append(entry)
+            else:
+                entry.attrib['Value'] = valstr
 
     def __delattr__(self, name):
         '''Like __setattr__() but for attribute deletion instead of assignment. This should only be implemented if del obj.name is meaningful for the object.'''
@@ -740,7 +706,7 @@ class XElementWrapper(ElementTree.Element):
                 NewNodeCreated = True
             else:
                 # No data provided to create the child element
-                return None
+                return (False, None)
 
         # Make sure the parent is set correctly
         VolumeManager.WrapElement(Child)
@@ -861,43 +827,26 @@ class XElementWrapper(ElementTree.Element):
         RemainingXPath = xpath[len(UnlinkedElementsXPath) + 1:]
         return (UnlinkedElementsXPath, LinkedElementsXPath, RemainingXPath)
 
+    def _replace_link(self, link_node):
+        '''Replace the link_node, removing it from our element.  Insert the linked directory'''
+        self.remove(link_node)
+        SubContainerPath = os.path.join(self.FullPath, link_node.attrib["Path"])
+        return self.LoadSubElement(SubContainerPath)
+        
 
     def findall(self, match):
 
         (UnlinkedElementsXPath, LinkedElementsXPath, RemainingXPath) = self.__ElementLinkNameFromXPath(match)
 
         # TODO: Need to modify to only search one level at a time
-
-
- #       if not isinstance(self, XContainerElementWrapper):
- #           return
         # OK, check for linked elements that also meet the criteria
 
         LinkMatches = super(XElementWrapper, self).findall(LinkedElementsXPath)
         if LinkMatches is None:
             return  # matches
 
-        for link in LinkMatches:
-            self.remove(link)
-            SubContainerPath = os.path.join(self.FullPath, link.attrib["Path"])
-
-            SubContainerElement = self.LoadSubElement(SubContainerPath)
-            if(SubContainerElement is None):
-                continue
-
-#            if len(RemainingXPath) > 0:
-#                subContainerMatches = SubContainerElement.findall(RemainingXPath)
-#                if subContainerMatches is not None:
-#                    for m in subContainerMatches:
-#                        yield m
-#                    # matches.extend(subContainerMatches)
-#            else:
-#                yield SubContainerElement
-
-            # print "Unloading " + str(SubContainerElement)
-            # self.remove(SubContainerElement)
-            # self.append(link)
-                # matches.append(SubContainerElement)
+        for link_node in LinkMatches:
+            self._replace_link(link_node)
 
         # return matches
         matches = super(XElementWrapper, self).findall(UnlinkedElementsXPath)
@@ -906,7 +855,13 @@ class XElementWrapper(ElementTree.Element):
 #             NotValid = m.CleanIfInvalid()
 #             if NotValid:
 #                 continue
-
+            if '_Link' in m.tag:
+                m_replaced = self._replace_link(m)
+                if m_replaced is None:
+                    continue
+                else: 
+                    m = m_replaced
+                
             if len(RemainingXPath) > 0:
                 subContainerMatches = m.findall(RemainingXPath)
                 if subContainerMatches is not None:
@@ -915,8 +870,8 @@ class XElementWrapper(ElementTree.Element):
             else:
                 yield m
 
-class XResourceElementWrapper(XElementWrapper):
-    '''Wrapper for an XML element that refers to a file'''
+class XResourceElementWrapper(VMH.Lockable, XElementWrapper):
+    '''Wrapper for an XML element that refers to a file or directory'''
 
     @property
     def Path(self):
@@ -992,6 +947,13 @@ class XResourceElementWrapper(XElementWrapper):
         return outStr
 
     def Clean(self, reason=None):
+        if self.Locked:
+            Logger = logging.getLogger(__name__ + '.' + 'Clean')
+            Logger.warning('Could not delete resource with locked flag set: %s' % self.FullPath)
+            if not reason is None:
+                Logger.warning('Reason for attempt: %s' % reason)
+            return
+            
         '''Remove the contents referred to by this node from the disk'''
         if os.path.exists(self.FullPath):
             try:
@@ -1002,7 +964,6 @@ class XResourceElementWrapper(XElementWrapper):
             except:
                 Logger = logging.getLogger(__name__ + '.' + 'Clean')
                 Logger.warning('Could not delete cleaned directory: ' + self.FullPath)
-                pass
 
         return super(XResourceElementWrapper, self).Clean(reason=reason)
 
@@ -1019,7 +980,7 @@ class XFileElementWrapper(XResourceElementWrapper):
 
     @Name.setter
     def Name(self, value):
-         self.attrib['Name'] = value
+        self.attrib['Name'] = value
 
 
     @property
@@ -1031,7 +992,7 @@ class XFileElementWrapper(XResourceElementWrapper):
 
     @Type.setter
     def Type(self, value):
-         self.attrib['Type'] = value
+        self.attrib['Type'] = value
 
     @property
     def Path(self):
@@ -1069,8 +1030,10 @@ class XFileElementWrapper(XResourceElementWrapper):
                 self.attrib['Checksum'] = str(checksum)
 
         return checksum
-
+    
+    
 class XContainerElementWrapper(XResourceElementWrapper):
+    '''XML meta-data for a container whose sub-elements are contained within a directory on the file system.  The directories container will always be the same, such as TilePyramid'''
 
     @property
     def SortKey(self):
@@ -1091,15 +1054,7 @@ class XContainerElementWrapper(XResourceElementWrapper):
                         return tagClass.ClassSortKey(self)
 
         return self.tag
-
-    @property
-    def Name(self):
-        return self.get('Name', '')
-
-    @Name.setter
-    def Name(self, Value):
-        self.attrib['Name'] = Value
-
+    
     @property
     def Path(self):
         return self.attrib.get('Path', '')
@@ -1132,8 +1087,7 @@ class XContainerElementWrapper(XResourceElementWrapper):
            Removes missing nodes from the volume.'''
 
         dirNames = os.listdir(self.FullPath)
-        dirList = []
-
+        
         for dirname in dirNames:
             volumeDataFullPath = os.path.join(dirname, "VolumeData.xml")
             if os.path.exists(volumeDataFullPath):
@@ -1171,7 +1125,7 @@ class XContainerElementWrapper(XResourceElementWrapper):
         XMLElement = XMLTree.getroot()
 
         VolumeManager.WrapElement(XMLElement)
-       # SubContainer = XContainerElementWrapper.wrap(XMLElement)
+        # SubContainer = XContainerElementWrapper.wrap(XMLElement)
 
         VolumeManager.__SetElementParent__(XMLElement, self)
 
@@ -1184,18 +1138,14 @@ class XContainerElementWrapper(XResourceElementWrapper):
         return XMLElement
 
 
-    def __init__(self, tag, Name, Path=None, attrib=None, **extra):
-
-        if Path is None:
-            Path = Name
+    def __init__(self, tag, path, attrib=None, **extra):
 
         if(attrib is None):
             attrib = {}
 
         super(XContainerElementWrapper, self).__init__(tag=tag, attrib=attrib, **extra)
-
-        self.attrib['Name'] = Name
-        self.attrib['Path'] = Path
+ 
+        self.attrib['Path'] = path
 
 
 
@@ -1275,11 +1225,12 @@ class XContainerElementWrapper(XResourceElementWrapper):
 
         # prettyoutput.Log("Saving %s" % XMLFilename)
         
-        if not os.path.exists(self.FullPath):
-            os.makedirs(self.FullPath)
+        saveDir = os.path.dirname(TempXMLFilename)
+        if not os.path.exists(saveDir):
+            os.makedirs(saveDir)
 
         OutputXML = ElementTree.tostring(SaveElement, encoding="utf-8")
-       # print OutputXML
+        # print OutputXML
         with open(TempXMLFilename, 'w') as hFile:
             hFile.write(OutputXML)
             hFile.close()
@@ -1290,6 +1241,28 @@ class XContainerElementWrapper(XResourceElementWrapper):
         except:
             pass
 
+class XNamedContainerElementWrapped(XContainerElementWrapper):
+    '''XML meta-data for a container whose sub-elements are contained within a directory on the file system whose name is not constant.  Such as a channel name.'''
+    
+    @property
+    def Name(self):
+        return self.get('Name', '')
+
+    @Name.setter
+    def Name(self, Value):
+        self.attrib['Name'] = Value
+
+    def __init__(self, tag, Name, Path=None, attrib=None, **extra):
+
+        if Path is None:
+            Path = Name
+
+        if attrib is None:
+            attrib = {}
+
+        super(XNamedContainerElementWrapped, self).__init__(tag=tag, path=Path, attrib=attrib, **extra)
+
+        self.attrib['Name'] = Name 
 
 class XLinkedContainerElementWrapper(XContainerElementWrapper):
     '''Child elements of XLinkedContainerElementWrapper are saved
@@ -1310,7 +1283,7 @@ class XLinkedContainerElementWrapper(XContainerElementWrapper):
         # pool = Pools.GetGlobalThreadPool()
 
         logger = logging.getLogger(__name__ + '.' + 'XLinkedContainerElementWrapper')
-        tabs = '\t' * tabLevel
+        #tabs = '\t' * tabLevel
         #logger.info('Saving ' + tabs + str(self))
         xmlfilename = 'VolumeData.xml'
         # Create a copy of ourselves for saving
@@ -1355,7 +1328,7 @@ class XLinkedContainerElementWrapper(XContainerElementWrapper):
             # pool.wait_completion()
 
 
-class BlockNode(XContainerElementWrapper):
+class BlockNode(XNamedContainerElementWrapped):
 
     @property
     def Sections(self):
@@ -1402,12 +1375,56 @@ class BlockNode(XContainerElementWrapper):
             return True
         
         return False
+    
+    def MarkSectionsAsDamaged(self, section_number_list):
+        '''Add the sections in the list to the NonStosSectionNumbers'''
+        if not isinstance(section_number_list, set) or isinstance(section_number_list, frozenset):
+            section_number_list = frozenset(section_number_list)
+            
+        existing_set = frozenset(self.NonStosSectionNumbers)
+        self.NonStosSectionNumbers = section_number_list.union(existing_set)
+        
+    def MarkSectionsAsUndamaged(self,section_number_list):
+        if not isinstance(section_number_list, set) or isinstance(section_number_list, frozenset):
+            section_number_list = frozenset(section_number_list)
+            
+        existing_set = frozenset(self.NonStosSectionNumbers)
+        self.NonStosSectionNumbers = existing_set.difference(section_number_list)
+    
+    @property
+    def NonStosSectionNumbers(self):
+        '''A list of integers indicating which section numbers should not be control sections for slice to slice registration'''
+        StosExemptNode = XElementWrapper(tag='NonStosSectionNumbers')
+        (added, StosExemptNode) = self.UpdateOrAddChild(StosExemptNode)
+    
+        # Fetch the list of the exempt nodes from the element text
+        ExemptString = StosExemptNode.text
+    
+        if(ExemptString is None or len(ExemptString) == 0):
+            return []
+    
+        # OK, parse the exempt string to a different list
+        NonStosSectionNumbers = sorted(frozenset([int(x) for x in ExemptString.split(',')]))
+    
+        return NonStosSectionNumbers
+    
+    @NonStosSectionNumbers.setter
+    def NonStosSectionNumbers(self, value):
+        '''A list of integers indicating which section numbers should not be control sections for slice to slice registration'''
+        StosExemptNode = XElementWrapper(tag='NonStosSectionNumbers')
+        (added, StosExemptNode) = self.UpdateOrAddChild(StosExemptNode)
+        
+        if isinstance(value, str):
+            StosExemptNode.text = value
+        elif isinstance(value, list) or isinstance(value, set) or isinstance(value, frozenset):
+            StosExemptNode.text = ','.join(list(map(str,value)))
+       
 
     def __init__(self, Name, Path=None, attrib=None, **extra):
         super(BlockNode, self).__init__(tag='Block', Name=Name, Path=Path, attrib=attrib, **extra)
 
 
-class ChannelNode(XContainerElementWrapper):
+class ChannelNode(XNamedContainerElementWrapped):
 
     @property
     def Filters(self):
@@ -1415,10 +1432,13 @@ class ChannelNode(XContainerElementWrapper):
 
     def GetFilter(self, Filter):
         return self.GetChildByAttrib('Filter', 'Name', Filter)
+    
+    def HasFilter(self, FilterName):
+        return not self.GetFilter(FilterName) is None
 
     def GetOrCreateFilter(self, Name):
         (added, filterNode) = self.UpdateOrAddChildByAttrib(FilterNode(Name), 'Name')
-        return filterNode
+        return (added, filterNode)
 
     def MatchFilterPattern(self, filterPattern):
         return VMH.SearchCollection(self.Filters,
@@ -1427,43 +1447,53 @@ class ChannelNode(XContainerElementWrapper):
 
     def GetTransform(self, transform_name):
         return self.GetChildByAttrib('Transform', 'Name', transform_name)
+    
+    def RemoveFilterOnContrastMismatch(self, FilterName, MinIntensityCutoff, MaxIntensityCutoff, Gamma):
+        '''
+        Return: true if filter found and removed
+        '''
+        
+        filter_node = self.GetFilter(Filter=FilterName)
+        if filter_node is None:
+            return False
+        
+        if filter_node.Locked:
+            if filter_node.IsContrastMismatched(MinIntensityCutoff, MaxIntensityCutoff, Gamma):
+                self.logger.warn("Locked filter cannot be removed for contrast mismatch. %s " % filter_node.FullPath)
+                return False 
+                
+        
+        return filter_node.RemoveNodeOnContrastMismatch(MinIntensityCutoff, MaxIntensityCutoff, Gamma)
+            
 
-    def __init__(self, Name, Path, attrib=None, **extra):
+    def __init__(self, Name, Path=None, attrib=None, **extra):
         super(ChannelNode, self).__init__(tag='Channel', Name=Name, Path=Path, attrib=attrib, **extra)
 
 
 def BuildFilterImageName(SectionNumber, ChannelName, FilterName, Extension=None):
-    return Config.Current.SectionTemplate % int(SectionNumber) + "_" + ChannelName + "_" + FilterName + Extension
+    return nornir_buildmanager.templates.Current.SectionTemplate % int(SectionNumber) + "_" + ChannelName + "_" + FilterName + Extension
 
-class FilterNode(XContainerElementWrapper):
+class FilterNode(XNamedContainerElementWrapped, VMH.ContrastHandler):
 
     DefaultMaskName = "Mask"
     
     def DefaultImageName(self, extension):
         '''Default name for an image in this filters imageset'''
         InputChannelNode = self.FindParent('Channel')
-        SectionNode = InputChannelNode.FindParent('Section')
-        return BuildFilterImageName(SectionNode.Number, InputChannelNode.Name, self.Name, extension)
-
+        section_node = InputChannelNode.FindParent('Section')
+        return BuildFilterImageName(section_node.Number, InputChannelNode.Name, self.Name, extension)
+    
     @property
-    def MaxIntensityCutoff(self):
-        if 'MaxIntensityCutoff' in self.attrib:
-            return float(self.attrib['MaxIntensityCutoff'])
+    def Histogram(self):
+        '''Get the image set for the filter, create if missing'''
+        # imageset = self.GetChildByAttrib('ImageSet', 'Name', ImageSetNode.Name)
+        # There should be only one Imageset, so use find
+        histogram = self.find('Histogram')
+        if histogram is None:
+            histogram = HistogramNode()
+            self.append(histogram)
 
-        return None
-
-    @property
-    def MinIntensityCutoff(self):
-        if 'MinIntensityCutoff' in self.attrib:
-            return float(self.attrib['MinIntensityCutoff'])
-        return None
-
-    @property
-    def Gamma(self):
-        if 'Gamma' in self.attrib:
-            return float(self.attrib['Gamma'])
-        return None
-
+        return histogram
     @property
     def BitsPerPixel(self):
         if 'BitsPerPixel' in self.attrib:
@@ -1473,22 +1503,6 @@ class FilterNode(XContainerElementWrapper):
     @BitsPerPixel.setter
     def BitsPerPixel(self, val):
         self.attrib['BitsPerPixel'] = '%d' % val
-
-    @property
-    def Locked(self):
-        if 'Locked' in self.attrib:
-            return bool(int(self.attrib['Locked']))
-
-        return False;
-
-    @Locked.setter
-    def Locked(self, val):
-        if not val:
-            if 'Locked' in self.attrib:
-                del self.attrib['Locked']
-                return
-
-        self.attrib['Locked'] = '%d' % val
 
     @property
     def TilePyramid(self):
@@ -1502,8 +1516,16 @@ class FilterNode(XContainerElementWrapper):
         return pyramid
     
     @property
+    def HasTilePyramid(self):
+        return not self.find('TilePyramid') is None
+    
+    @property
     def HasImageset(self):
         return not self.find('ImageSet') is None
+    
+    @property
+    def HasTileset(self):
+        return not self.find('Tileset') is None
 
     @property
     def Imageset(self):
@@ -1516,6 +1538,16 @@ class FilterNode(XContainerElementWrapper):
             self.append(imageset)
 
         return imageset
+    
+    @property
+    def MaskImageset(self):
+        '''Get the imageset for the default mask'''
+        
+        maskFilter = self.GetMaskFilter()
+        if maskFilter is None:
+            return None
+        
+        return maskFilter.Imageset
 
     @property
     def MaskName(self):
@@ -1534,28 +1566,43 @@ class FilterNode(XContainerElementWrapper):
                 del self.attrib['MaskName']
         else:
             self.attrib['MaskName'] = val
-
+            
+            
+    def GetOrCreateMaskName(self):
+        '''Returns the maskname for the filter, if it does not exist use the default mask name'''
+        if self.MaskName is None:
+            self.MaskName = FilterNode.DefaultMaskName 
+            
+        return self.MaskName
+            
     @property
-    def DefaultMaskFilter(self):
-        maskname = self.MaskName
-        if maskname is None:
-            maskname = FilterNode.DefaultMaskName
-
-        return self.GetMaskFilter(maskname)
-
-    def GetMaskFilter(self, MaskName):
+    def HasMask(self):
+        '''
+        :return: True if the mask filter exists
+        '''
+        return not self.GetMaskFilter() is None
+    
+    
+    def GetMaskFilter(self, MaskName=None):
+        if MaskName is None:
+            MaskName = self.MaskName
+            
         if MaskName is None:
             return None
+        
+        assert(isinstance(MaskName, str))
 
-        return self.Parent.GetChildByAttrib('Filter', 'Name', MaskName)
+        return self.Parent.GetFilter(MaskName)
+    
 
-    def GetOrCreateMaskFilter(self, maskname=None):
-        if maskname is None:
-            maskname = FilterNode.DefaultMaskName
+    def GetOrCreateMaskFilter(self, MaskName=None):
+        if MaskName is None:
+            MaskName = self.GetOrCreateMaskName()
+            
+        assert(isinstance(MaskName, str))
 
-        assert(isinstance(maskname, str))
+        return self.Parent.GetOrCreateFilter(MaskName)
 
-        return self.Parent.GetOrCreateFilter(maskname)
 
     def GetImage(self, Downsample):
         if not self.HasImageset:
@@ -1563,32 +1610,41 @@ class FilterNode(XContainerElementWrapper):
         
         return self.Imageset.GetImage(Downsample)
 
+
     def GetOrCreateImage(self, Downsample):
         imageset = self.Imageset
         return imageset.GetOrCreateImage(Downsample)
 
+
     def GetMaskImage(self, Downsample):
-        maskFilter = self.DefaultMaskFilter
+        maskFilter = self.GetMaskFilter()
         if maskFilter is None:
             return None
 
         return maskFilter.GetImage(Downsample)
 
+
     def GetOrCreateMaskImage(self, Downsample):
-        maskFilter = self.GetOrCreateMaskFilter()
+        (added_mask_filter, maskFilter) = self.GetOrCreateMaskFilter()
         return maskFilter.GetOrCreateImage(Downsample)
+
 
     def GetHistogram(self):
         return self.find('Histogram')
-        
-        pass
 
     def __init__(self, Name, Path=None, attrib=None, **extra):
         if Path is None:
             Path = Name
 
         super(FilterNode, self).__init__(tag='Filter', Name=Name, Path=Path, attrib=attrib, **extra)
-
+        
+    def SetContrastValues(self, MinIntensityCutoff, MaxIntensityCutoff, Gamma):
+        self.attrib['MinIntensityCutoff'] = "%g" % MinIntensityCutoff
+        self.attrib['MaxIntensityCutoff'] = "%g" % MaxIntensityCutoff
+        self.attrib['Gamma'] = "%g" % Gamma
+        
+    def _LogContrastMismatch(self, MinIntensityCutoff, MaxIntensityCutoff, Gamma):
+        XElementWrapper.logger.warn("\tCurrent values (%g,%g,%g), target (%g,%g,%g)" % (self.MinIntensityCutoff, self.MaxIntensityCutoff, self.Gamma, MinIntensityCutoff, MaxIntensityCutoff, Gamma))
 
 class NotesNode(XResourceElementWrapper):
 
@@ -1611,12 +1667,12 @@ class NotesNode(XResourceElementWrapper):
         return False
 
 
-class SectionNode(XContainerElementWrapper):
+class SectionNode(XNamedContainerElementWrapped):
 
     @classmethod
     def ClassSortKey(cls, self):
         '''Required for objects derived from XContainerElementWrapper'''
-        return "Section " + (Config.Current.SectionTemplate % int(self.Number))
+        return "Section " + (nornir_buildmanager.templates.Current.SectionTemplate % int(self.Number))
 
     @property
     def SortKey(self):
@@ -1656,16 +1712,16 @@ class SectionNode(XContainerElementWrapper):
     def __init__(self, Number, Name=None, Path=None, attrib=None, **extra):
 
         if Name is None:
-            Name = str(Number)
+            Name = nornir_buildmanager.templates.Current.SectionTemplate % Number
 
         if Path is None:
-            Path = Config.Current.SectionTemplate % Number
+            Path = nornir_buildmanager.templates.Current.SectionTemplate % Number
 
         super(SectionNode, self).__init__(tag='Section', Name=Name, Path=Path, attrib=attrib, **extra)
         self.Number = Number
 
 
-class StosGroupNode(XContainerElementWrapper):
+class StosGroupNode(XNamedContainerElementWrapped):
 
     @property
     def Downsample(self):
@@ -1754,40 +1810,120 @@ class StosGroupNode(XContainerElementWrapper):
             self.__LegacyUpdateStosNode(stosNode, ControlFilter, MappedFilter, OutputPath)   
 
         return (added, stosNode)
+    
+    def  AddChecksumsToStos(self, stosNode, ControlFilter, MappedFilter):
+            
+        if MappedFilter.Imageset.HasImage(self.Downsample) or MappedFilter.Imageset.CanGenerate(self.Downsample):
+            stosNode.attrib['MappedImageChecksum'] = MappedFilter.Imageset.GetOrCreateImage(self.Downsample).Checksum
+        else:
+            stosNode.attrib['MappedImageChecksum'] = ""
+        
+        if ControlFilter.Imageset.HasImage(self.Downsample) or ControlFilter.Imageset.CanGenerate(self.Downsample):
+            stosNode.attrib['ControlImageChecksum'] = ControlFilter.Imageset.GetOrCreateImage(self.Downsample).Checksum
+        else:
+            stosNode.attrib['ControlImageChecksum'] = ""
+            
+        if MappedFilter.HasMask and ControlFilter.HasMask:
+            if MappedFilter.MaskImageset.HasImage(self.Downsample) or MappedFilter.MaskImageset.CanGenerate(self.Downsample):
+                stosNode.attrib['MappedMaskImageChecksum'] = MappedFilter.MaskImageset.GetOrCreateImage(self.Downsample).Checksum
+            else:
+                stosNode.attrib['MappedMaskImageChecksum'] = ""
+            
+            if ControlFilter.MaskImageset.HasImage(self.Downsample) or ControlFilter.MaskImageset.CanGenerate(self.Downsample):
+                stosNode.attrib['ControlMaskImageChecksum'] = ControlFilter.MaskImageset.GetOrCreateImage(self.Downsample).Checksum
+            else:
+                stosNode.attrib['ControlMaskImageChecksum'] = ""
+
 
     def CreateStosTransformNode(self, ControlFilter, MappedFilter, OutputType, OutputPath):
-
-       MappedSectionNode = MappedFilter.FindParent("Section")
-       MappedChannelNode = MappedFilter.FindParent("Channel")
-       ControlSectionNode = ControlFilter.FindParent("Section")
-       ControlChannelNode = ControlFilter.FindParent("Channel")
-
-       SectionMappingsNode = self.GetSectionMapping(MappedSectionNode.Number)
-       assert(not SectionMappingsNode is None) #We expect the caller to arrange for a section mappings node in advance
-
-       stosNode = TransformNode(str(ControlSectionNode.Number), OutputType, OutputPath, {'ControlSectionNumber' : str(ControlSectionNode.Number),
+        '''
+        :param FilterNode ControlFilter: Filter for control image
+        :param FilterNode MappedFilter: Filter for mapped image
+        :param str OutputType: Type of stosNode
+        :Param str OutputPath: Full path to .stos file
+        '''
+        
+        MappedSectionNode = MappedFilter.FindParent("Section")
+        MappedChannelNode = MappedFilter.FindParent("Channel")
+        ControlSectionNode = ControlFilter.FindParent("Section")
+        ControlChannelNode = ControlFilter.FindParent("Channel")
+        
+        SectionMappingsNode = self.GetSectionMapping(MappedSectionNode.Number)
+        assert(not SectionMappingsNode is None) #We expect the caller to arrange for a section mappings node in advance
+               
+        stosNode = TransformNode(str(ControlSectionNode.Number), OutputType, OutputPath, {'ControlSectionNumber' : str(ControlSectionNode.Number),
                                                                                         'MappedSectionNumber' : str(MappedSectionNode.Number),
                                                                                         'MappedChannelName' : str(MappedChannelNode.Name),
                                                                                         'MappedFilterName' : str(MappedFilter.Name),
-                                                                                        'MappedImageChecksum' : str(MappedFilter.Imageset.Checksum),
                                                                                         'ControlChannelName' : str(ControlChannelNode.Name),
-                                                                                        'ControlFilterName' : str(ControlFilter.Name),
-                                                                                        'ControlImageChecksum' : str(ControlFilter.Imageset.Checksum)})
+                                                                                        'ControlFilterName' : str(ControlFilter.Name)})
+         
+        self.AddChecksumsToStos(stosNode, ControlFilter, MappedFilter)
+#        WORKAROUND: The etree implementation has a serious shortcoming in that it cannot handle the 'and' operator in XPath queries.
+#        (added, stosNode) = SectionMappingsNode.UpdateOrAddChildByAttrib(stosNode, ['ControlSectionNumber',
+#                                                                                    'ControlChannelName',
+#                                                                                    'ControlFilterName',
+#                                                                                    'MappedSectionNumber',
+#                                                                                    'MappedChannelName',
+#                                                                                    'MappedFilterName'])
 
-   #        WORKAROUND: The etree implementation has a serious shortcoming in that it cannot handle the 'and' operator in XPath queries.
-   #        (added, stosNode) = SectionMappingsNode.UpdateOrAddChildByAttrib(stosNode, ['ControlSectionNumber',
-   #                                                                                    'ControlChannelName',
-   #                                                                                    'ControlFilterName',
-   #                                                                                    'MappedSectionNumber',
-   #                                                                                    'MappedChannelName',
-   #                                                                                    'MappedFilterName'])
-
-
-       SectionMappingsNode.append(stosNode)   
+        SectionMappingsNode.append(stosNode)   
        
-       
-
-       return stosNode
+        return stosNode
+    
+    
+    @classmethod 
+    def _IsStosInputImageOutdated(cls, stosNode, ChecksumAttribName, imageNode):
+        '''
+        :param TransformNode stosNode: Stos Transform Node to test
+        :param str ChecksumAttribName: Name of attribute with checksum value on image node
+        :param ImageNode imageNode: Image node to test
+        '''
+                
+        if imageNode is None:
+            return True
+        
+        IsInvalid = False
+        
+        if len(stosNode.attrib.get(ChecksumAttribName,"")) > 0:
+            IsInvalid = IsInvalid or not nornir_buildmanager.validation.transforms.IsValueMatched(stosNode, ChecksumAttribName, imageNode.Checksum)
+        else:
+            if not os.path.exists(imageNode.FullPath):
+                IsInvalid = IsInvalid or True
+            else:
+                IsInvalid = IsInvalid or nornir_shared.files.IsOutdated(imageNode.FullPath, stosNode.FullPath)
+            
+        return IsInvalid
+        
+   
+    def AreStosInputImagesOutdated(self, stosNode, ControlFilter, MappedFilter, MaskRequired):
+        '''
+        :param TransformNode stosNode: Stos Transform Node to test
+        :param FilterNode ControlFilter: Filter for control image
+        :param FilterNode MappedFilter: Filter for mapped image
+        :param str OutputType: Type of stosNode
+        :Param str OutputPath: Full path to .stos file
+        '''
+        
+        if stosNode is None or ControlFilter is None or MappedFilter is None:
+            return True
+        
+        ControlImageNode = ControlFilter.GetOrCreateImage(self.Downsample)
+        MappedImageNode = MappedFilter.GetOrCreateImage(self.Downsample)
+        
+        IsInvalid = False
+        
+        IsInvalid = IsInvalid or StosGroupNode._IsStosInputImageOutdated(stosNode, ChecksumAttribName='ControlImageChecksum', imageNode=ControlImageNode)
+        IsInvalid = IsInvalid or StosGroupNode._IsStosInputImageOutdated(stosNode, ChecksumAttribName='MappedImageChecksum', imageNode=MappedImageNode)
+        
+        if MaskRequired:
+            ControlMaskImageNode = ControlFilter.GetMaskImage(self.Downsample)
+            MappedMaskImageNode = MappedFilter.GetMaskImage(self.Downsample)
+            IsInvalid = IsInvalid or StosGroupNode._IsStosInputImageOutdated(stosNode, ChecksumAttribName='ControlMaskImageChecksum', imageNode=ControlMaskImageNode)
+            IsInvalid = IsInvalid or StosGroupNode._IsStosInputImageOutdated(stosNode, ChecksumAttribName='MappedMaskImageChecksum', imageNode=MappedMaskImageNode)
+         
+        return IsInvalid
+    
    
     def __LegacyUpdateStosNode(self, stosNode, ControlFilter, MappedFilter, OutputPath):
         
@@ -1986,7 +2122,7 @@ class MappingNode(XElementWrapper):
     @property
     def SortKey(self):
         '''The default key used for sorting elements'''
-        return self.tag + ' ' + (Config.Current.SectionTemplate % self.Control)
+        return self.tag + ' ' + (nornir_buildmanager.templates.Current.SectionTemplate % self.Control)
 
     @property
     def Control(self):
@@ -2027,7 +2163,7 @@ class MappingNode(XElementWrapper):
 
 
     def __str__(self):
-        return "%d <- %s" % (self.Control, str(Mapped))
+        return "%d <- %s" % (self.Control, str(self.Mapped))
 
 
     def __init__(self, ControlNumber, MappedNumbers, attrib=None, **extra):
@@ -2143,11 +2279,11 @@ class MosaicBaseNode(XFileElementWrapper):
         self.attrib['Type'] = Value
 
 
-class TransformNode(VMH.InputTransformHandler, MosaicBaseNode):
+class TransformNode(VMH.InputTransformHandler,  MosaicBaseNode):
 
     def __init__(self, Name, Type, Path=None, attrib=None, **extra):
         super(TransformNode, self).__init__(tag='Transform', Name=Name, Type=Type, Path=Path, attrib=attrib, **extra)
-
+         
     @property
     def CropBox(self):
         '''Returns boundaries of transform output if available, otherwise none
@@ -2184,22 +2320,18 @@ class TransformNode(VMH.InputTransformHandler, MosaicBaseNode):
         else:
             raise Exception("Invalid argument passed to TransformNode.CropBox %s.  Expected 2 or 4 element tuple." % str(bounds))
 
-
-
     def IsValid(self):
+        '''Check if the transform is valid.  Be careful using this, because it only checks the existing meta-data. 
+           If you are comparing to a new input transform you should use VMH.IsInputTransformMatched'''
         valid = VMH.InputTransformHandler.InputTransformIsValid(self)
         if valid:
             return super(TransformNode, self).IsValid()
-
-
-
-
+        
 
 class ImageSetBaseNode(VMH.InputTransformHandler, VMH.PyramidLevelHandler, XContainerElementWrapper):
 
-    def __init__(self, Name, Type, Path, attrib=None, **extra):
-        super(ImageSetBaseNode, self).__init__(tag='ImageSet', Name=Name, Path=Path, attrib=attrib, **extra)
-        self.attrib['Name'] = Name
+    def __init__(self, Type, Path, attrib=None, **extra):
+        super(ImageSetBaseNode, self).__init__(tag='ImageSet', path=Path, attrib=attrib, **extra)
         self.attrib['Type'] = Type
         self.attrib['Path'] = Path
         
@@ -2232,6 +2364,9 @@ class ImageSetBaseNode(VMH.InputTransformHandler, VMH.PyramidLevelHandler, XCont
             return None
 
         return image
+    
+    def HasImage(self, Downsample):
+        return not self.GetImage(Downsample) is None
 
     def GetOrCreateImage(self, Downsample, Path=None, GenerateData=True):
         '''Returns image node for the specified downsample. Generates image if requested and image is missing.  If unable to generate an image node is returned'''
@@ -2239,19 +2374,46 @@ class ImageSetBaseNode(VMH.InputTransformHandler, VMH.PyramidLevelHandler, XCont
 
         imageNode = LevelNode.find("Image")
         if imageNode is None:
+            
+            if GenerateData and not self.CanGenerate(Downsample):
+                raise ValueError("%s Cannot generate downsample %d" % (self.FullPath, Downsample))
+            
             if Path is None:
-                Path = ImageNode.DefaultName
+                Path = self.__PredictImageFilename()
 
             imageNode = ImageNode(Path)
-            [added, imageNode] = LevelNode.UpdateOrAddChild(imageNode)
+            [level_added, imageNode] = LevelNode.UpdateOrAddChild(imageNode)
             if not os.path.exists(imageNode.FullPath):
                 if not os.path.exists(os.path.dirname(imageNode.FullPath)):
                     os.makedirs(os.path.dirname(imageNode.FullPath))
-
+                
                 if GenerateData:
                     self.__GenerateMissingImageLevel(OutputImage=imageNode, Downsample=Downsample)
-
+            
+            self.Save()
+                    
         return imageNode
+    
+    
+    def __PredictImageFilename(self):
+        '''Get the path of the highest resolution image in this ImageSet'''
+        list_images = list(self.Images)
+        if len(list_images) > 0:
+            return list_images[0].Path
+        
+        raise LookupError("No images found to predict path in imageset %s" % self.FullPath)
+    
+    
+    def GetOrPredictImageFullPath(self, Downsample):
+        '''Either return what the full path to the image at the downsample is, or predict what it should be if it does not exist without creating it
+        :rtype: str
+        '''
+        image_node = self.GetImage(Downsample)
+        if image_node is None:
+            return os.path.join(self.FullPath, LevelNode.PredictPath(Downsample) ,self.__PredictImageFilename() )
+        else:
+            return image_node.FullPath
+        
 
     def __GetImageNearestToLevel(self, Downsample):
         '''Returns the nearest existing image and downsample level lower than the requested downsample level'''
@@ -2274,7 +2436,9 @@ class ImageSetBaseNode(VMH.InputTransformHandler, VMH.PyramidLevelHandler, XCont
         return (SourceImage, SourceDownsample)
 
     def GenerateLevels(self, Levels):
-        tile.BuildImagePyramid(self, Levels, Interlace=False)
+        node = tile.BuildImagePyramid(self, Levels, Interlace=False)
+        if not node is None:
+            node.Save()
 
     def __GenerateMissingImageLevel(self, OutputImage, Downsample):
         '''Creates a downsampled image from available high-res images if needed'''
@@ -2291,18 +2455,21 @@ class ImageSetBaseNode(VMH.InputTransformHandler, VMH.PyramidLevelHandler, XCont
 
         ShrinkP = nornir_shared.images.Shrink(SourceImage.FullPath, OutputImage.FullPath, float(Downsample) / float(SourceDownsample))
         ShrinkP.wait()
-
+        
         return OutputImage
 
     def IsValid(self):
         valid = VMH.InputTransformHandler.InputTransformIsValid(self)
         if valid:
             return super(ImageSetBaseNode, self).IsValid()
+        
+    @property
+    def Checksum(self):
+        raise NotImplementedError("Checksum on ImageSet... not sure why this would be needed.  Try using checksum of highest resolution image instead?")
 
 
 class ImageSetNode(ImageSetBaseNode):
-
-    DefaultName = 'Images'
+ 
     DefaultPath = 'Images'
 
     def __init__(self, Type=None, attrib=None, **extra):
@@ -2313,7 +2480,7 @@ class ImageSetNode(ImageSetBaseNode):
         # if Path is None:
         #    Path = ImageSetNode.Name + Type
 
-        super(ImageSetNode, self).__init__(Name=ImageSetNode.DefaultName, Type=Type, Path=ImageSetNode.DefaultPath, attrib=attrib, **extra)
+        super(ImageSetNode, self).__init__(Type=Type, Path=ImageSetNode.DefaultPath, attrib=attrib, **extra)
 
 
 class ImageNode(VMH.InputTransformHandler, XFileElementWrapper):
@@ -2357,7 +2524,7 @@ class SectionMappingsNode(XElementWrapper):
     @property
     def SortKey(self):
         '''The default key used for sorting elements'''
-        return self.tag + ' ' + (Config.Current.SectionTemplate % self.MappedSectionNumber)
+        return self.tag + ' ' + (nornir_buildmanager.templates.Current.SectionTemplate % self.MappedSectionNumber)
 
     @property
     def MappedSectionNumber(self):
@@ -2418,7 +2585,7 @@ class SectionMappingsNode(XElementWrapper):
 
 
     def CleanIfInvalid(self):
-        self.CleanTransformsIfInvalid(self)
+        self.CleanTransformsIfInvalid()
         XElementWrapper.CleanIfInvalid(self)
 
 
@@ -2482,14 +2649,13 @@ class TilePyramidNode(XContainerElementWrapper, VMH.PyramidLevelHandler):
     def __init__(self, NumberOfTiles=0, LevelFormat=None, ImageFormatExt=None, attrib=None, **extra):
 
         if LevelFormat is None:
-            LevelFormat = Config.Current.LevelFormat
+            LevelFormat = nornir_buildmanager.templates.Current.LevelFormat
 
         if ImageFormatExt is None:
             ImageFormatExt = '.png'
 
-        super(TilePyramidNode, self).__init__(tag='TilePyramid',
-                                               Name=TilePyramidNode.DefaultName,
-                                               Path=TilePyramidNode.DefaultPath,
+        super(TilePyramidNode, self).__init__(tag='TilePyramid', 
+                                               path=TilePyramidNode.DefaultPath,
                                                attrib=attrib, **extra)
 
         self.attrib['NumberOfTiles'] = str(NumberOfTiles)
@@ -2497,11 +2663,12 @@ class TilePyramidNode(XContainerElementWrapper, VMH.PyramidLevelHandler):
         self.attrib['ImageFormatExt'] = ImageFormatExt
 
     def GenerateLevels(self, Levels):
-        tile.BuildTilePyramids(self, Levels)
+        node = tile.BuildTilePyramids(self, Levels)
+        if not node is None:
+            node.Save()
 
 class TilesetNode(XContainerElementWrapper, VMH.PyramidLevelHandler):
-
-    DefaultName = 'Tileset'
+ 
     DefaultPath = 'Tileset'
 
     @property
@@ -2537,22 +2704,27 @@ class TilesetNode(XContainerElementWrapper, VMH.PyramidLevelHandler):
         self.attrib['TileYDim'] = '%d' % int(val)
 
     def __init__(self, attrib=None, **extra):
-        super(TilesetNode, self).__init__(tag='Tileset', Name=TilesetNode.DefaultName, attrib=attrib, **extra)
-
-        self.Name = TilesetNode.DefaultName
+        super(TilesetNode, self).__init__(tag='Tileset', path=TilesetNode.DefaultPath, attrib=attrib, **extra)
+ 
         if(not 'Path' in self.attrib):
             self.attrib['Path'] = TilesetNode.DefaultPath
 
     def GenerateLevels(self, Levels):
-        tile.BuildTilesetPyramid(self)
+        node = tile.BuildTilesetPyramid(self)
+        if not node is None:
+            node.Save()
 
 
 class LevelNode(XContainerElementWrapper):
 
     @classmethod
+    def PredictPath(cls, level):
+        return nornir_buildmanager.templates.Current.LevelFormat % int(level)
+        
+    @classmethod
     def ClassSortKey(cls, self):
         '''Required for objects derived from XContainerElementWrapper'''
-        return "Level" + ' ' + Config.Current.DownsampleFormat % float(self.Downsample)
+        return "Level" + ' ' + nornir_buildmanager.templates.Current.DownsampleFormat % float(self.Downsample)
 
     @property
     def SortKey(self):
@@ -2575,6 +2747,7 @@ class LevelNode(XContainerElementWrapper):
     @Downsample.setter
     def Downsample(self, Value):
         self.attrib['Downsample'] = '%g' % Value
+                
 
     def IsValid(self):
         '''Remove level directories without files, or with more files than they should have'''
@@ -2603,9 +2776,9 @@ class LevelNode(XContainerElementWrapper):
             GridXDim = int(self.GridDimX) - 1
             GridYDim = int(self.GridDimY) - 1
 
-            GridXString = Config.Current.GridTileCoordTemplate % GridXDim
-            # MatchString = os.path.join(OutputDir, FilePrefix + 'X%' + Config.GridTileCoordFormat % GridXDim + '_Y*' + FilePostfix)
-            MatchString = os.path.join(self.FullPath, Config.Current.GridTileMatchStringTemplate % {'prefix' :FilePrefix,
+            GridXString = nornir_buildmanager.templates.Current.GridTileCoordTemplate % GridXDim
+            # MatchString = os.path.join(OutputDir, FilePrefix + 'X%' + nornir_buildmanager.templates.GridTileCoordFormat % GridXDim + '_Y*' + FilePostfix)
+            MatchString = os.path.join(self.FullPath, nornir_buildmanager.templates.Current.GridTileMatchStringTemplate % {'prefix' :FilePrefix,
                                                                                         'X' :  GridXString,
                                                                                         'Y' : '*',
                                                                                         'postfix' :  FilePostfix})
@@ -2615,24 +2788,22 @@ class LevelNode(XContainerElementWrapper):
             TestIndicies.extend(range((GridYDim / 2) + 1, -1, -1))
             for iY in TestIndicies:
                 # MatchString = os.path.join(OutputDir, FilePrefix +
-                #                           'X' + Config.GridTileCoordFormat % GridXDim +
-                #                           '_Y' + Config.GridTileCoordFormat % iY +
+                #                           'X' + nornir_buildmanager.templates.GridTileCoordFormat % GridXDim +
+                #                           '_Y' + nornir_buildmanager.templates.GridTileCoordFormat % iY +
                 #                           FilePostfix)
-                MatchString = os.path.join(self.FullPath, Config.Current.GridTileMatchStringTemplate % {'prefix' :  FilePrefix,
+                MatchString = os.path.join(self.FullPath, nornir_buildmanager.templates.Current.GridTileMatchStringTemplate % {'prefix' :  FilePrefix,
                                                                                         'X' : GridXString,
-                                                                                        'Y' : Config.Current.GridTileCoordTemplate % iY,
+                                                                                        'Y' : nornir_buildmanager.templates.Current.GridTileCoordTemplate % iY,
                                                                                         'postfix' : FilePostfix})
                 if(os.path.exists(MatchString)):
                     return [True, "Last column found"]
 
-                MatchString = os.path.join(self.FullPath, Config.Current.GridTileMatchStringTemplate % {'prefix' :  FilePrefix,
+                MatchString = os.path.join(self.FullPath, nornir_buildmanager.templates.Current.GridTileMatchStringTemplate % {'prefix' :  FilePrefix,
                                                                                         'X' : str(GridXDim),
                                                                                         'Y' : str(iY),
                                                                                         'postfix' : FilePostfix})
                 if(os.path.exists(MatchString)):
                     return [True, "Last column found"]
-
-
 
             return [False, "Last column of tileset not found"]
 
@@ -2644,17 +2815,15 @@ class LevelNode(XContainerElementWrapper):
         if(attrib is None):
             attrib = {}
 
-        attrib['Path'] = Config.Current.LevelFormat % int(Level)
-
         if isinstance(Level, str):
             attrib['Downsample'] = Level
         else:
             attrib['Downsample'] = '%g' % Level
 
-        super(XContainerElementWrapper, self).__init__(tag='Level', attrib=attrib, **extra)
+        super(LevelNode, self).__init__(tag='Level', path=LevelNode.PredictPath(Level), attrib=attrib, **extra)
 
 
-class HistogramBase(XElementWrapper):
+class HistogramBase(VMH.InputTransformHandler, XElementWrapper):
 
     @property
     def DataNode(self):
@@ -2696,7 +2865,7 @@ class HistogramBase(XElementWrapper):
         '''Check for the transform node and ensure the checksums match'''
         # TransformNode = self.Parent.find('Transform')
 
-        return True
+        return super(HistogramBase, self).IsValid()
 
     def __init__(self, tag, attrib, **extra):
         super(HistogramBase, self).__init__(tag=tag, attrib=attrib, **extra)
@@ -2769,8 +2938,7 @@ class HistogramNode(HistogramBase):
 
     def __init__(self, InputTransformNode, Type, attrib, **extra):
         super(HistogramNode, self).__init__(tag='Histogram', attrib=attrib, **extra)
-        self.attrib['InputTransformType'] = InputTransformNode.Type
-        self.attrib['InputTransformChecksum'] = InputTransformNode.Checksum
+        self.SetTransform(InputTransformNode)
         self.attrib['Type'] = Type
 
     def GetAutoLevelHint(self):
@@ -2781,7 +2949,7 @@ class HistogramNode(HistogramBase):
             return self.GetAutoLevelHint()
         else:
             # Create a new AutoLevelData node using the calculated values as overrides so users can find and edit it later
-            [added, AutoLevelDataNode] = self.UpdateOrAddChild(AutoLevelHintNode())
+            self.UpdateOrAddChild(AutoLevelHintNode())
             return self.GetAutoLevelHint()
 
 class PruneNode(HistogramBase):

@@ -18,6 +18,7 @@ from nornir_buildmanager import metadatautils
 from nornir_buildmanager.VolumeManagerETree import *
 from nornir_buildmanager.importers import filenameparser
 import nornir_shared.prettyoutput as prettyoutput
+import nornir_shared.files
 
 
 imageNameMappings = [mapping('Section', typefunc=int),
@@ -48,6 +49,16 @@ def FillInMissingImageNameData(imageData):
 
     return imageData
 
+
+
+def Import(VolumeElement, ImportPath, extension, *args, **kwargs):
+    '''Import the specified directory into the volume'''
+        
+    DirList = nornir_shared.files.RecurseSubdirectoriesGenerator(ImportPath, RequiredFiles="*." + extension)
+    for path in DirList:
+        for idocFullPath in glob.glob(os.path.join(path, '*.' + extension)):
+            yield SectionImage.ToMosaic(VolumeElement, idocFullPath, VolumeElement.FullPath)
+    
 
 
 class SectionImage(object):
@@ -114,7 +125,7 @@ class SectionImage(object):
             if BlockName is None or len(BlockName) == 0:
                 BlockName = 'LM'
 
-            BlockObj = XContainerElementWrapper('Block', BlockName);
+            BlockObj = BlockNode(BlockName);
             [addedBlock, BlockObj] = VolumeObj.UpdateOrAddChild(BlockObj);
 
             if(fileData is None):
@@ -133,7 +144,7 @@ class SectionImage(object):
 
             ChannelName = fileData.Channel
             ChannelName = ChannelName.replace(' ', '_')
-            channelObj = XContainerElementWrapper('Channel', ChannelName)
+            channelObj = ChannelNode(ChannelName)
             [channelAdded, channelObj] = sectionObj.UpdateOrAddChildByAttrib(channelObj, 'Name')
 
             # Create a filter for the images
@@ -142,9 +153,7 @@ class SectionImage(object):
             if(TargetBpp is None):
                 FilterName = 'Raw';
 
-            filterObj = XContainerElementWrapper('Filter', FilterName);
-            [addedFilter, filterObj] = channelObj.UpdateOrAddChildByAttrib(filterObj, "Name");
-
+            (added_filter, filterObj) = channelObj.GetOrCreateFilter(FilterName);
             filterObj.BitsPerPixel = TargetBpp
 
             # Create an image for the filter
