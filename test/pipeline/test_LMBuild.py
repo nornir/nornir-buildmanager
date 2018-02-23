@@ -6,6 +6,7 @@ Created on Mar 15, 2013
 import unittest
 
 from nornir_buildmanager.VolumeManagerETree import *
+
 import nornir_buildmanager.build as build
 import setup_pipeline
 
@@ -25,7 +26,7 @@ class ShadingCorrectionTest(LMBuildTest):
     def testLMBuild(self):
 
         # Import the files
-        buildArgs = [self.TestOutputPath, '-debug', '-verbose', 'ImportPMG', self.ImportedDataPath]
+        buildArgs = [self.TestOutputPath, '-debug', '-verbose', 'ImportPMG', self.ImportedDataPath ,'-Scale', '72']
         build.Execute(buildArgs)
 
         buildArgs = [self.TestOutputPath, '-debug', '-verbose', 'ShadeCorrect', '-Correction', 'brightfield']

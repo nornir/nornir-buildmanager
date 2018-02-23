@@ -1,6 +1,7 @@
-import os
 import collections
 import csv
+import os
+
 
 ContrastValues = collections.namedtuple('ContrastValues', ('Section', 'Min', 'Max', 'Gamma'))
 DefaultHistogramFilename = "ContrastOverrides.txt"
@@ -20,8 +21,11 @@ def LoadHistogramCutoffs(filename):
         return Values
     
     with open(filename, 'rb') as contrastFile:
-        csvReader = csv.reader(contrastFile, delimiter=' ', skipinitialspace=True, )
+        csvReader = csv.reader(contrastFile, delimiter=' ', skipinitialspace=True,)
         for line in csvReader:
+            if len(line) == 0:
+                continue
+            
             if line[0].startswith("#"):
                 continue
             

@@ -3,27 +3,25 @@ Created on Feb 14, 2013
 
 @author: u0490822
 '''
+import datetime
 import logging
 import os
 import shutil
 import sys
 import tempfile
-import unittest
 import time
-import datetime
-
-import test.testbase
-
+import unittest
 
 from nornir_buildmanager.VolumeManagerETree import *
 from nornir_buildmanager.VolumeManagerHelpers import SearchCollection
-import nornir_buildmanager.build as build
-from nornir_buildmanager.validation import transforms
-from nornir_imageregistration.files.mosaicfile import *
 from nornir_buildmanager.argparsexml import NumberList
-import nornir_shared.misc
+from nornir_buildmanager.validation import transforms
 import nornir_imageregistration.files
- 
+from nornir_imageregistration.files.mosaicfile import *
+import nornir_shared.misc
+import test.testbase
+
+import nornir_buildmanager.build as build
 
 
 def VerifyVolume(test, VolumeObj, listVolumeEntries):
@@ -71,7 +69,7 @@ def FullPathsForNodes(node_list):
 
 def BuildPathToModifiedDateMap(path_list):
     '''Given a list of paths, construct a dictionary which maps to a cached last modified date'''
-    file_to_modified_time= {}
+    file_to_modified_time = {}
     for file_path in path_list:
         mtime = datetime.datetime.fromtimestamp(os.path.getmtime(file_path))
         file_to_modified_time[file_path] = mtime
@@ -99,29 +97,32 @@ def EnumerateFilters(SectionNodes, Channels, Filters):
                 
 def EnumerateImageSets(testObj, volumeNode, Channels, Filter, RequireMasks=True):
     '''Used after assemble or blob create an imageset to ensure the correct levels exist'''
-    
+
     sections = list(volumeNode.findall("Block/Section"))
     filters = EnumerateFilters(sections, Channels, Filter)
-    
+
     for f in filters:
         if RequireMasks:
             testObj.assertTrue(f.HasMask, "Mask expected for filters")
-            
+
         image_sets = list(f.findall('ImageSet'))
         testObj.assertIsNotNone(image_sets, "ImageSet node not found")
-        testObj.assertEqual(len(image_sets),1, "Multiple ImageSet nodes found")
+        testObj.assertEqual(len(image_sets), 1, "Multiple ImageSet nodes found")
         yield image_sets[0]
-        
-def EnumerateTileSets(testObj, volumeNode, Channels, Filter):
+
+def EnumerateTileSets(testObj, volumeNode, Channels, Filter=None):
     '''Used after assemble or blob create an imageset to ensure the correct levels exist'''
-    
+
+    if Filter is None:
+        Filter = '(?![M|m]ask)'
+
     sections = list(volumeNode.findall("Block/Section"))
     filters = EnumerateFilters(sections, Channels, Filter)
-    
+
     for f in filters:
         tile_sets = list(f.findall('Tileset'))
         testObj.assertIsNotNone(tile_sets, "Tileset node not found")
-        testObj.assertEqual(len(tile_sets),1, "Multiple Tileset nodes found")
+        testObj.assertEqual(len(tile_sets), 1, "Multiple Tileset nodes found")
         yield tile_sets[0]
 
 
@@ -164,10 +165,9 @@ class VolumeEntry(object):
             x = VolumeEntry.xpathtemplate % {'xpath' : self.XPath, 'AttribName' : self.AttributeName, 'AttribValue' : self.AttributeValue}
 
         return x
-
-
-class PlatformTest(test.testbase.TestBase):
-    '''Base class to use for tests that require executing commands on the pipeline.  Tests have gradually migrated to using this base class. 
+       
+class NornirBuildTestBase(test.testbase.TestBase):
+    '''Base class to use for tests that require executing commands on the pipeline.  Tests have gradually migrated to using this base class or PlatformTest
        Eventually all platforms should have the same standard tests taking input to a volume under this framework to ensure basic functionality
        is operating.  At this time the IDOC platform is the only one with a complete test.  PMG has a thorough test not entirely integrated with
        this class'''
@@ -177,32 +177,15 @@ class PlatformTest(test.testbase.TestBase):
         raise Exception("VolumePath property not implemented")
 
     @property
-    def Platform(self):
-        raise Exception("Platform property not implemented")
-
-    @property
-    def PlatformFullPath(self):
-        return os.path.join(self.TestInputPath, "PlatformRaw", self.Platform)
-    
-    
-    @property
     def TestSetupCachePath(self):
         '''The directory where we can cache the setup phase of the tests.  Delete to obtain a clean run of all tests'''
         if 'TESTOUTPUTPATH' in os.environ:
             TestOutputDir = os.environ["TESTOUTPUTPATH"]
             return os.path.join(TestOutputDir, 'Cache', self.Platform, self.VolumePath)
         else:
-            self.fail("TESTOUTPUTPATH environment variable should specify input data directory")
+            self.fail("TESTOUTPUTPATH environment variable should specify output data directory")
 
         return None
-     
-    @property
-    def ImportedDataPath(self):
-
-        if self.VolumePath and len(self.VolumePath) > 0:
-            return os.path.join(self.PlatformFullPath, self.VolumePath)
-        else:
-            return self.PlatformFullPath
 
     def RunBuild(self, buildArgs):
         '''Run a build, ensure the output directory exists, and return the volume obj'''
@@ -210,7 +193,7 @@ class PlatformTest(test.testbase.TestBase):
         build.Execute(buildArgs)
         self.assertTrue(os.path.exists(self.TestOutputPath), "Test input was not copied")
         return self.LoadVolume()
-        
+
     def LoadVolume(self):
         '''Load the volume meta data from disk''' 
         VolumeObj = VolumeManager.Load(self.TestOutputPath)
@@ -218,6 +201,9 @@ class PlatformTest(test.testbase.TestBase):
         self.assertTrue(os.path.exists(VolumeObj.FullPath))
 
         return VolumeObj
+
+    def LoadOrCreateVolume(self):
+        return nornir_buildmanager.VolumeManagerETree.VolumeManager.Load(self.TestOutputPath, Create=True)
 
     def _CreateBuildArgs(self, pipeline=None, *args):
 
@@ -227,7 +213,7 @@ class PlatformTest(test.testbase.TestBase):
             # pargs.append('-pipeline')
             pargs.append(pipeline)
 
-        #pargs.extend([self.TestOutputPath])
+        # pargs.extend([self.TestOutputPath])
 
         pargs.extend(args)
 
@@ -240,13 +226,7 @@ class PlatformTest(test.testbase.TestBase):
         pargs.extend(args)
 
         return pargs
-
-    def setUp(self):
-        '''Imports a volume and stops, tests call pipeline functions'''
-        super(PlatformTest, self).setUp()
-        self.assertTrue(os.path.exists(self.PlatformFullPath), "Test data for platform does not exist:" + self.PlatformFullPath)
-
-
+  
     def ValidateTransformChecksum(self, Node):
         '''Ensure that the reported checksum and actual file checksum match'''
         self.assertTrue(hasattr(Node, 'Checksum'))
@@ -308,28 +288,6 @@ class PlatformTest(test.testbase.TestBase):
     def RunImportThroughMosaicAssemble(self):
         self.RunImportThroughMosaic()
         self.RunAssemble()
-        
-    def RunImport(self):
-        if 'idoc' in self.Platform.lower():
-            return self.RunIDocImport()
-        elif 'pmg' in self.Platform.lower():
-            return self.RunPMGImport()
-        elif 'dm4' in self.Platform.lower():
-            return self.RunDM4Import()
-            
-        raise NotImplementedError("Derived classes should point RunImport at a specific importer")
-
-    def RunIDocImport(self):
-        buildArgs = self._CreateImportArgs('ImportIDoc', self.ImportedDataPath)
-        self.RunBuild(buildArgs)
-        
-    def RunPMGImport(self):
-        buildArgs = self._CreateImportArgs('ImportPMG', self.ImportedDataPath)
-        self.RunBuild(buildArgs)
-        
-    def RunDM4Import(self):
-        buildArgs = self._CreateImportArgs('ImportDM4', self.ImportedDataPath)
-        self.RunBuild(buildArgs)
 
     def RunPrune(self, Filter=None, Downsample=None):
         if Filter is None:
@@ -346,8 +304,13 @@ class PlatformTest(test.testbase.TestBase):
 
         PruneNode = volumeNode.find("Block/Section/Channel/Transform[@Name='Prune']")
         self.assertIsNotNone(PruneNode, "No prune node produced")
-        
-        #Delete one prune data file, and make sure the associated .mosaic regenerates
+
+        #Pick a section and ensure the filter only has one prune node
+        for SectionNode in volumeNode.findall("Block/Section"):
+            PruneNodes = list(volumeNode.findall("Block/Section[@Number='%d']/Channel/Filter/Prune" % SectionNode.Number))
+            self.assertEqual(len(PruneNodes), 1, "Multiple prune nodes created for section %d" % SectionNode.Number)
+
+        # Delete one prune data file, and make sure the associated .mosaic regenerates
         return volumeNode
 
 
@@ -525,8 +488,11 @@ class PlatformTest(test.testbase.TestBase):
         self._VerifyInputTransformIsCorrect(image_set_node, InputTransformName=transform_name)
         
     
-    def _VerifyPyramidHasExpectedLevels(self, pyramid_node, expected_levels, ):
+    def _VerifyPyramidHasExpectedLevels(self, pyramid_node, expected_levels):
         '''Used to ensure that any node with level children nodes has the correct levels'''
+        if not nornir_shared.misc.IsSequence(expected_levels):
+            expected_levels = [expected_levels]
+        
         for level in expected_levels:
             LevelNode = pyramid_node.find("Level[@Downsample='%d']" % (level))
             self.assertIsNotNone(LevelNode, "No Level node at level %d" % (level))
@@ -534,7 +500,10 @@ class PlatformTest(test.testbase.TestBase):
         
      
     
-    def _VerifyImageSetHasExpectedLevels(self, image_set_node, expected_levels, ):
+    def _VerifyImageSetHasExpectedLevels(self, image_set_node, expected_levels):
+        if not nornir_shared.misc.IsSequence(expected_levels):
+            expected_levels = [expected_levels]
+            
         for level in expected_levels:
             AssembledImageNode = image_set_node.find("Level[@Downsample='%d']/Image" % (level))
             self.assertIsNotNone(AssembledImageNode, "No Image node at level %d produced from assemble pipeline" % (level))
@@ -566,24 +535,21 @@ class PlatformTest(test.testbase.TestBase):
 
         return volumeNode
     
-    def RunAssembleTiles(self, Channels=None, Filter=None, TransformName=None, Levels=1, Shape=[512,512]):
+    def RunAssembleTiles(self, Channels=None, Filter=None, TransformName=None, Levels=1, Shape=[512, 512]):
         if Filter is None:
             Filter = "Leveled"
             
         if TransformName is None:
             TransformName = 'Grid'
         
-        Levels = ConvertLevelsToList(Levels)
-        LevelsStr = ConvertLevelsToString(Levels) 
-        
         ShapeStr = ConvertLevelsToString(Shape)
         
         # Build Mosaics
         buildArgs = []
         if not Channels is None:
-            buildArgs = self._CreateBuildArgs('AssembleTiles', '-Channels', Channels, '-Transform', TransformName, '-Filters', Filter, '-Downsample', LevelsStr, '-Shape', ShapeStr)
+            buildArgs = self._CreateBuildArgs('AssembleTiles', '-Channels', Channels, '-Transform', TransformName, '-Filters', Filter, '-HighestDownsample', str(Levels), '-Shape', ShapeStr)
         else:
-            buildArgs = self._CreateBuildArgs('AssembleTiles', '-Transform', TransformName, '-Filters', Filter, '-Downsample', LevelsStr, '-Shape', ShapeStr)
+            buildArgs = self._CreateBuildArgs('AssembleTiles', '-Transform', TransformName, '-Filters', Filter, '-HighestDownsample', str(Levels), '-Shape', ShapeStr)
             
         volumeNode = self.RunBuild(buildArgs)
  
@@ -635,12 +601,12 @@ class PlatformTest(test.testbase.TestBase):
 
         for image_set_node in EnumerateImageSets(self, volumeNode, Channels, Filter='Blob', RequireMasks=True) : 
             self._VerifyImageSetHasExpectedLevels(image_set_node, Levels)
-            #self._VerifyImageSetMatchesTransform(image_set_node, TransformName)
+            # self._VerifyImageSetMatchesTransform(image_set_node, TransformName)
             
         return volumeNode
     
     
-    def _StosFileHasMasks(self,stosfileFullPath):
+    def _StosFileHasMasks(self, stosfileFullPath):
         stosfileObj = nornir_imageregistration.files.StosFile.Load(stosfileFullPath)
         return stosfileObj.HasMasks
     
@@ -662,25 +628,29 @@ class PlatformTest(test.testbase.TestBase):
         self.assertIsNotNone(sectionNodes)
         self.VerifySectionsHaveStosTransform(stos_group_node, stos_map_node.CenterSection, sectionNodes)
         
-        #Run align again, make sure the last modified date is unchanged
+        # Run align again, make sure the last modified date is unchanged
         full_paths = FullPathsForNodes(stos_group_node.findall("SectionMappings/Transform"))
         transform_last_modified = BuildPathToModifiedDateMap(full_paths)
         
-        #Make sure our output stos file has masks if they were called for
+        # Make sure our output stos file has masks if they were called for
         self.assertEqual(self._StosFileHasMasks(full_paths[0]), MasksRequired, "%s does not match mask expectation, masks expected = %s" % (full_paths[0], '-UseMasks' in buildArgs))
           
         volumeNode = self.RunBuild(buildArgs)
         self.VerifyFilesLastModifiedDateUnchanged(transform_last_modified)
         
 
-    def RunAlignSections(self, Channels, Filters, Levels, Center=None, UseMasks=True):
+    def RunAlignSections(self, Channels, Filters, Levels, Angles=None, Center=None, UseMasks=True):
         # Build Mosaics
         buildArgs = self._CreateBuildArgs('AlignSections', '-NumAdjacentSections', '1', '-Filters', Filters, '-Downsample', str(Levels), '-Channels', Channels)
         if not Center is None:
             buildArgs = self._CreateBuildArgs('AlignSections', '-NumAdjacentSections', '1', '-Filters', Filters, '-Downsample', str(Levels), '-Channels', Channels, '-Center', str(Center))
             
         if UseMasks:
-            buildArgs.append('-UseMasks')             
+            buildArgs.append('-UseMasks')
+            
+        if Angles:
+            buildArgs.append('-AngleRange')
+            buildArgs.append('%s' % Angles)             
         
         volumeNode = self.RunBuild(buildArgs)
         self.assertIsNotNone(volumeNode)
@@ -738,7 +708,7 @@ class PlatformTest(test.testbase.TestBase):
         image_nodes = list(stos_group_node.findall('SectionMappings/Image'))
         self.assertGreater(len(image_nodes), 0, "Images should be produced by RunAssembleStosOverlays")
         
-        #Check that the overlays are not regenerated on a rebuild
+        # Check that the overlays are not regenerated on a rebuild
         full_paths = FullPathsForNodes(image_nodes)
         image_last_modified = BuildPathToModifiedDateMap(full_paths)
         
@@ -771,7 +741,7 @@ class PlatformTest(test.testbase.TestBase):
                                           '-InputDownsample', str(InputLevel),
                                           '-OutputGroup', OutputGroup,
                                           '-OutputDownsample', str(OutputLevel),
-                                          '-Filter', 'Leveled', 
+                                          '-Filter', 'Leveled',
                                           '-Iterations', "3",
                                           '-Threshold', "1.0")
         if UseMasks:
@@ -782,7 +752,7 @@ class PlatformTest(test.testbase.TestBase):
         stos_group_node = volumeNode.find("Block/StosGroup[@Name='%s%d']" % (OutputGroup, OutputLevel))
         self.assertIsNotNone(stos_group_node, "No %s%d Stos Group node produced" % (OutputGroup, OutputLevel))
           
-        self.VerifyStosTransformPipelineSharedTests(volumeNode=volumeNode, stos_group_name='%s%d' % (OutputGroup, OutputLevel), stos_map_name='FinalStosMap',  MasksRequired='-UseMasks' in buildArgs, buildArgs=buildArgs)
+        self.VerifyStosTransformPipelineSharedTests(volumeNode=volumeNode, stos_group_name='%s%d' % (OutputGroup, OutputLevel), stos_map_name='FinalStosMap', MasksRequired='-UseMasks' in buildArgs, buildArgs=buildArgs)
          
         return volumeNode
 
@@ -802,10 +772,10 @@ class PlatformTest(test.testbase.TestBase):
     def RunSliceToVolume(self, Level=1):
         # Build Mosaics
         group_name = 'SliceToVolume'
-        buildArgs = self._CreateBuildArgs('SliceToVolume', '-InputDownsample', str(Level), '-InputGroup', 'Grid', '-OutputGroup', 'SliceToVolume')
+        buildArgs = self._CreateBuildArgs('SliceToVolume', '-Downsample', str(Level), '-InputGroup', 'Grid', '-OutputGroup', 'SliceToVolume')
         volumeNode = self.RunBuild(buildArgs)
 
-        StosGroupNode = volumeNode.find("Block/StosGroup[@Name='%s%d']" % (group_name,Level))
+        StosGroupNode = volumeNode.find("Block/StosGroup[@Name='%s%d']" % (group_name, Level))
         self.assertIsNotNone(StosGroupNode, "No SliceToVolume%d stos group node created" % Level)
         
         MasksRequired = self._StosGroupHasMasks(StosGroupNode)
@@ -909,34 +879,34 @@ class PlatformTest(test.testbase.TestBase):
         '''Remove a single image from an image pyramid
         :return: Filename that was deleted
         '''
-        
+
         levelNode = self.__GetLevelNode(section_number, channel, filter, level)
         self.assertIsNotNone(levelNode, "Missing level %d" % (level))
-        
+
         # Choose a random tile and remove it
         pngFiles = glob.glob(os.path.join(levelNode.FullPath, '*.png'))
-        
+
         chosenPngFile = pngFiles[0]
-        
+
         os.remove(chosenPngFile)
-        
+
         return chosenPngFile
-    
+
     def RemoveAndRegenerateTile(self, RegenFunction, RegenKwargs, section_number, channel='TEM', filter='Leveled', level=1,):
         '''Remove a tile from an image pyramid level.  Run adjust contrast and ensure the tile is regenerated after RegenFunction is called'''
         removedTileFullPath = self.RemoveTileFromPyramid(section_number, channel, filter, level)
-        
+
         RegenFunction(**RegenKwargs)
-        
+
         self.assertTrue(os.path.exists(removedTileFullPath), "Deleted tile was not regenerated %s" % removedTileFullPath)
-        
+
     def CopyManualStosFiles(self, ManualStosFullPath, StosGroupName):
         '''Copy all stos files from the manual stos directory into the StosGroup's manual directory.
         :param str ManualStosFullPath: Directory containing .stos files
         :param str StosGroupName: Stos group to add manual files to
         :return: list of transform nodes targeted by copied manual files
         '''
-        
+
         volumeNode = self.LoadVolume()
         StosGroupNode = volumeNode.find("Block/StosGroup[@Name='%s']" % StosGroupName)
         self.assertIsNotNone(StosGroupNode)
@@ -949,13 +919,67 @@ class PlatformTest(test.testbase.TestBase):
             
             stosFilePath = os.path.basename(f)
             
-            #Find the TransformNode in the stos group we expect to be replaced by this manual file
+            # Find the TransformNode in the stos group we expect to be replaced by this manual file
             stosTransform = StosGroupNode.find("SectionMappings/Transform[@Path='%s']" % stosFilePath)
             self.assertIsNotNone(stosTransform, "Stos transform file that is overriden by manual files does not exist: %s" % stosFilePath)
             
             stosTransformList.append(stosTransform)
             
         return stosTransformList
+    
+class PlatformTest(NornirBuildTestBase):
+
+    @property
+    def Platform(self):
+        raise Exception("Platform property not implemented")
+
+    @property
+    def PlatformFullPath(self):
+        return os.path.join(self.TestInputPath, "PlatformRaw", self.Platform)
+    
+    @property
+    def ImportedDataPath(self):
+
+        if self.VolumePath and len(self.VolumePath) > 0:
+            return os.path.join(self.PlatformFullPath, self.VolumePath)
+        else:
+            return self.PlatformFullPath
+
+    def setUp(self):
+        '''Imports a volume and stops, tests call pipeline functions'''
+        super(PlatformTest, self).setUp()
+        self.assertTrue(os.path.exists(self.PlatformFullPath), "Test data for platform does not exist:" + self.PlatformFullPath)
+
+    def RunImport(self):
+        if 'idoc' in self.Platform.lower():
+            return self.RunIDocImport()
+        elif 'pmg' in self.Platform.lower():
+            return self.RunPMGImport()
+        elif 'dm4' in self.Platform.lower():
+            return self.RunDM4Import()
+
+        raise NotImplementedError("Derived classes should point RunImport at a specific importer")
+
+    def RunIDocImport(self):
+        buildArgs = self._CreateImportArgs('ImportIDoc', self.ImportedDataPath)
+        self.RunBuild(buildArgs)
+
+    def RunPMGImport(self):
+        buildArgs = self._CreateImportArgs('ImportPMG', self.ImportedDataPath)
+        buildArgs.extend(['-Scale', '0.01'])
+        self.RunBuild(buildArgs)
+
+    def RunDM4Import(self):
+        buildArgs = self._CreateImportArgs('ImportDM4', self.ImportedDataPath)
+        self.RunBuild(buildArgs)
+
+
+class EmptyVolumeTestBase(NornirBuildTestBase):
+    '''The class to use when one only wants an empty volume'''
+
+    def setUp(self):
+        super(EmptyVolumeTestBase, self).setUp()
+        VolumeManager.Load(self.TestOutputPath, Create=True)
 
 
 class CopySetupTestBase(PlatformTest):

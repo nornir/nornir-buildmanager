@@ -39,25 +39,28 @@ def SetContrastRange(HistogramElement, MinValue, MaxValue, GammaValue, **kwargs)
     logger = logging.getLogger(__name__ + '.SetContrastRange')
 
     if math.isnan(MinValue):
-        minStr = "Default"
+        minStr = "Default/Unchanged"
     else:
         minStr = MinValue
 
     if math.isnan(MaxValue):
-        maxStr = "Default"
+        maxStr = "Default/Unchanged"
     else:
         maxStr = MaxValue
 
     if math.isnan(GammaValue):
-        gammaStr = "Default"
+        gammaStr = "Default/Unchanged"
     else:
         gammaStr = GammaValue
 
     AutoLevelHint = HistogramElement.GetOrCreateAutoLevelHint()
 
-    AutoLevelHint.UserRequestedMinIntensityCutoff = MinValue
-    AutoLevelHint.UserRequestedMaxIntensityCutoff = MaxValue
-    AutoLevelHint.UserRequestedGamma = GammaValue
+    if not math.isnan(MinValue):
+        AutoLevelHint.UserRequestedMinIntensityCutoff = float(MinValue)
+    if not math.isnan(MaxValue):
+        AutoLevelHint.UserRequestedMaxIntensityCutoff = float(MaxValue)
+    if not math.isnan(GammaValue):
+        AutoLevelHint.UserRequestedGamma = GammaValue
 
     SetFilterLock(AutoLevelHint, False)
 
@@ -66,6 +69,32 @@ def SetContrastRange(HistogramElement, MinValue, MaxValue, GammaValue, **kwargs)
     return HistogramElement.FindParent('Filter')
 
 
+def PrintContrast(FilterElement, **kwargs):
+    
+    ChannelElement = FilterElement.FindParent('Channel')
+    SectionElement = FilterElement.FindParent('Section')
+    
+    minI = FilterElement.MinIntensityCutoff
+    maxI = FilterElement.MaxIntensityCutoff
+    gamma = FilterElement.Gamma
+    
+    if minI is None:
+        minI = float('nan')
+        
+    if maxI is None:
+        maxI = float('nan')
+        
+    if gamma is None:
+        gamma = float('nan')
+    
+    output = ("{0:s}{1:s}{2:s}{3:s}{4:s}{5:s}".format(("{0:d}".format(SectionElement.Number)).ljust(6),
+                                                    ChannelElement.Name.ljust(16), FilterElement.Name.ljust(16), 
+                                                    ("{0:g}".format(minI)).ljust(8),
+                                                    ("{0:g}".format(maxI)).ljust(8),
+                                                    ("{0:g}".format(gamma)).ljust(8)))
+    
+    print(output)
+       
 def SetFilterContrastLocked(FilterNode, Locked, **kwargs):
 
     logger = logging.getLogger(__name__ + '.SetFilterContrastLocked')
@@ -97,6 +126,7 @@ def MarkSectionsAsDamaged(block_node, SectionNumbers, **kwargs):
 def MarkSectionsAsUndamaged(block_node, SectionNumbers, **kwargs):
     block_node.MarkSectionsAsUndamaged(SectionNumbers)
     return block_node.Parent
+
 
 if __name__ == '__main__':
     pass
